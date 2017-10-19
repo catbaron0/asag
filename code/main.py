@@ -1,10 +1,11 @@
 from nltk.corpus import wordnet as wn
 from nltk.corpus import wordnet_ic as wic
-import re, time, sys
+import re
+import sys
 import numpy as np
 from munkres import Munkres
 from nltk.metrics import *
-from sklearn.feature_extraction.text import TfidfVectorizer
+# from sklearn.feature_extraction.text import TfidfVectorizer
 import nltk
 import string
 import os
@@ -18,6 +19,11 @@ from sklearn.svm import SVR
 
 LEVENSHTEIN = 3
 
+# Paths
+SCRIPT_PATH = os.path.dirname(__file__)
+DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
+RESULTS_PATH = SCRIPT_PATH + "/../results"
+
 
 class Sentence:
     def __init__(self, graph_text, ans_id=''):
@@ -30,7 +36,7 @@ class Sentence:
             self.question_num:
                 Int. Corresponding question number of current sentence (q or a)
             self.edges:
-                List of tuples. [(relate, governor, dependent),...].
+                List of tuplles. [(relate, governor, dependent),...].
                 Relate, governor and dependent are strings.
                 Relate and governor are nodes: word:POS:index such like 'problem:NNS:3'
             self.nodes:
@@ -42,15 +48,15 @@ class Sentence:
         """
         tmp = graph_text.split(' ')
         self.id, self.edges_text = tmp[0], ' '.join(tmp[1:])
-        self.id = self.id + "." + ans_id
+        self.id = self.id + "." + ans_id  # Question id + answer id when there is an answer id
         self.edges = [self._read_edges(edge_text) for edge_text in self.edges_text.split('|||')][:-1]
-        self.nodes = self._read_nodes()
+        self.nodes = self._read_nodes
         self.subgraph = {}
         for node in self.nodes:
             self.subgraph[node] = [self._find_sub_graph(node, level) for level in range(4)]
         self.words = self._read_words()
         self.words_with_demoting = self.words
-        self.similarity = {}
+        self.similarity = {}  # cache for similarity, in case one similarity be calculated for times
 
     def _read_words(self):
         return list(map(lambda n: n.split(':')[0], self.nodes))
@@ -65,17 +71,24 @@ class Sentence:
     @staticmethod
     def _read_edges(edge_text):
         """
-        Convert relate(governor, dependent) to (relate, governor, dependert)
+        Convert relate(governor, dependent) to (relate, governor, dependent)
+        nn(problem:NNS:3, High:NNP:1) --> tuple(nn, problem:NNS:3, High:NNP:1)
+        The meta data should not contain characters of '(' or ')'. Replace them if it does.
         """
         edge = tuple(edge_text.replace('(', ', ').replace(')', '').split(', '))
         return edge
 
+    @property
     def _read_nodes(self):
+        """
+        Read nodes of dependency graph from edges.
+        :return: A set of nodes in tuple
+        """
         nodes = set()
         for e in self.edges:
             nodes.add(e[1])
             nodes.add(e[2])
-        return list(nodes)
+        return tuple(nodes)
 
     def _find_sub_graph(self, node, level):
         """
@@ -132,98 +145,95 @@ def overlap(syn1, syn2):
     return len(def1 & def2) / len(def1 | def2)
 
 
-def similarity_nodes(fun, node_stu, node_ins, cache, ic=None):
+def similarity_nodes(func, node_stu, node_ins, cache, ic=None):
     """
-        Calculate one similarity between two words and save it to cache dict to avoid
-        repeat calculation.
-        fun: Similarity function from wordnet
-        word1, word2: words of answers from student and instructor
-        """
+    Calculate one similarity between two words and save it to cache dict to avoid
+    repeat calculation.
+    :param func:
+        Similarity function from wordnet
+    :param node_stu:
+        node of student answer in form of problem:NNS:3
+    :param node_ins:
+        node of reference answer in form of problem:NNS:3
+    :param cache:
+        Dictionary to save calculated similarities.
+    :param ic:
+        parameter for some of similarity function of WordNet.
+    :return:
+        Real number between 0 to 1.
+    """
+
     word1, word2 = node_ins.split(":")[0], node_stu.split(":")[0]
     c_key = word1 + ',' + word2
     if c_key in cache:
         return cache[c_key]
 
-    if fun.__name__ == 'lch_similarity':
-        # sims = [fun(s1, s2) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word1) for s2 in wn.synsets(word2)]
-        sims = [fun(s1, s2) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word1) if
+    if func.__name__ == 'lch_similarity':
+        sims = [func(s1, s2) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word1) if
                 s1.name().split('.')[0] == word1 for s2 in wn.synsets(word2) if s2.name().split('.')[0] == word2]
-    elif fun.__name__ in {'res_similarity', 'lin_similarity', 'jcn_similarity'}:
-        # sims = [fun(s1, s2, ic) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word1) for s2 in wn.synsets(word2)]
-        sims = [fun(s1, s2, ic) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word1) if
+    elif func.__name__ in {'res_similarity', 'lin_similarity', 'jcn_similarity'}:
+        sims = [func(s1, s2, ic) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word1) if
                 s1.name().split('.')[0] == word1 for s2 in wn.synsets(word2) if s2.name().split('.')[0] == word2]
     else:
-        # sims = [fun(s1, s2) for s1 in wn.synsets(word1) for s2 in wn.synsets(word2)]
-        sims = [fun(s1, s2) for s1 in wn.synsets(word1) if s1.name().split('.')[0] == word1 for s2 in wn.synsets(word2)
+        sims = [func(s1, s2) for s1 in wn.synsets(word1) if s1.name().split('.')[0] == word1 for s2 in wn.synsets(word2)
                 if s2.name().split('.')[0] == word2]
     sims = list(filter(lambda x: x, sims))
     if not sims:
-        # print('WARNING: The similarity of "{0}" between [{1}] and [{2}] is 0!'.format(fun.__name__, word1, word2))
         sim = 0
         pass
     else:
         sim = max(sims)
-    # if 1 == sim:
-    #     print('{0} and {1} are same!'.format(node_stu, node_ins))
     cache[c_key] = sim
     return sim
 
 
-def similarity_between_nodes(fun, node_stu, ans_stu, node_ins, ans_ins, ic=None):
+# def similarity_between_nodes(fun, node_stu, ans_stu, node_ins, ans_ins, ic=None):
+#     """
+#     Calculate one similarity between two nodes (not subgraph) and save it to instructor answer to avoid
+#     repeat calculation.
+#     fun: Similarity function from wordnet
+#     node_stu, node_ins: Nodes of dependence graph of answers from student and instructor
+#     ans_stu, ans_ins: Sentence objects of answers from student and instructor
+#     """
+#     if ans_stu not in ans_ins.similarity:
+#         ans_ins.similarity[ans_stu] = {}
+#
+#     if fun.__name__ in ans_ins.similarity[ans_stu]:
+#         return ans_ins.similarity[ans_stu][fun.__name__]
+#
+#     word_stu, word_ins = node_ins.split(":")[0], node_stu.split(":")[0]
+#     if fun.__name__ == 'lch_similarity':
+#         sims = [fun(s1, s2) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word_stu) for s2 in
+#                 wn.synsets(word_ins)]
+#     elif fun.__name__ in {'res_similarity', 'lin_similarity', 'jcn_similarity'}:
+#         sims = [fun(s1, s2, ic) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word_stu) for s2 in
+#                 wn.synsets(word_ins)]
+#     else:
+#         sims = [fun(s1, s2) for s1 in wn.synsets(word_stu) for s2 in wn.synsets(word_ins)]
+#     sims = list(filter(lambda x: x, sims))
+#     if not sims:
+#         # print('WARNING: The similarity of "{0}" between [{1}] and [{2}] is 0!'.format(fun.__name__, word1, word2))
+#         sim = 0
+#         pass
+#     else:
+#         sim = max(sims)
+#     return sim
+
+
+def similarity_subgraph(func, nodes_stu, nodes_ins, cache, ic=None):
     """
-    Calculate one similarity between two nodes (not subgraph) and save it to instructor answer to avoid
-    repeat calculation.
-    fun: Similarity function from wordnet
-    node_stu, node_ins: Nodes of dependence graph of answers from student and instructor
-    ans_stu, ans_ins: Sentence objects of answers from student and instructor
-    """
-    if ans_stu not in ans_ins.similarity:
-        ans_ins.similarity[ans_stu] = {}
-
-    if fun.__name__ in ans_ins.similarity[ans_stu]:
-        return ans_ins.similarity[ans_stu][fun.__name__]
-
-    word_stu, word_ins = node_ins.split(":")[0], node_stu.split(":")[0]
-    if fun.__name__ == 'lch_similarity':
-        sims = [fun(s1, s2) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word_stu) for s2 in
-                wn.synsets(word_ins)]
-    elif fun.__name__ in {'res_similarity', 'lin_similarity', 'jcn_similarity'}:
-        sims = [fun(s1, s2, ic) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word_stu) for s2 in
-                wn.synsets(word_ins)]
-    else:
-        sims = [fun(s1, s2) for s1 in wn.synsets(word_stu) for s2 in wn.synsets(word_ins)]
-    sims = list(filter(lambda x: x, sims))
-    if not sims:
-        # print('WARNING: The similarity of "{0}" between [{1}] and [{2}] is 0!'.format(fun.__name__, word1, word2))
-        sim = 0
-        pass
-    else:
-        sim = max(sims)
-    return sim
-
-
-def similarity_subgraph(fun, nodes_stu, nodes_ins, cache, ic=None):
-    """
-    Return wordnet similarity between two set of nodes. This function calculate similarity between
-    each pair of nodes and return the largest one.
-    fun: similarity function from wordnet
-    nodes_stu, nodes_ins: set of nodes of answers from students and instructor
-    ans_stu, ans_ins: Sentence objects of student and instructor answers
+    Return wordnet similarity between two set of nodes.
+    This function calculate similarity between each pair of nodes and return the largest one.
+    fun:
+        similarity function from wordnet
+    nodes_stu, nodes_ins:
+        set of nodes of answers from students and instructor
     :rtype: int
     """
-    # print('--------{}...'.format(fun.__name__))
-    # sims = [similarity_nodes(fun, node_stu, node_ins, cache, ic=ic) for node_stu in nodes_stu for node_ins in nodes_ins]
-    # sims = {}
     sims = []
     for node_stu, node_ins in [(ns, ni) for ns in nodes_stu for ni in nodes_ins]:
-        sim = similarity_nodes(fun, node_stu, node_ins, cache, ic=ic)
+        sim = similarity_nodes(func, node_stu, node_ins, cache, ic=ic)
         sims.append(sim)
-        # if sim == 1:
-        #     print('{} and {} are the same!'.format(node_stu, node_ins))
-        # sims[node_stu+','+node_ins] = sim
-    # print('sims:', sims)
-    # print(sims)
-    # sim = max(sims.values())
     sim = max(sims) if sims else 0
     return sim
 
@@ -231,13 +241,15 @@ def similarity_subgraph(fun, nodes_stu, nodes_ins, cache, ic=None):
 def knowledge_based_feature_between_sentence_8(nodes_stu, nodes_ins, cache):
     """
     8 dimension knowledge based features between two sentences.
-
-    ans_stu, ans_ins:
-        Sentence object of student/instructor answers
-    return:
-        a 8-dimension list of knowledge based features for the input pair
-    Each feature between two answer is the largest one among all of features
-    calculated between every pair of nodes from each subgraph.
+    Used for generating 30 dimension BOW features.
+    Each feature between two answer is the largest one among all
+    of features calculated between every pair of nodes from each subgraph.
+    :param nodes_ins:
+        node of reference answer
+    :param nodes_stu:
+        node of student answer
+    :type cache: Dict
+        A 8-dimension list of knowledge based features for the input pair
     """
     f_shortest_path = similarity_subgraph(wn.path_similarity, nodes_stu, nodes_ins, cache)
     f_lch = similarity_subgraph(wn.lch_similarity, nodes_stu, nodes_ins, cache)
@@ -253,7 +265,7 @@ def knowledge_based_feature_between_sentence_8(nodes_stu, nodes_ins, cache):
 
 def semantic_similarity_between_subgraph_9(nodes_stu, nodes_ins, cache, ic):
     """
-    Subgraph-level similarity.
+    Subgraph-level similarity. Used for alignment matching score.
 
     subgraph_stu, subgraph_ins:
         Set of nodes of subgraph of student and instructor answers in form of 'word:pos:los'
@@ -262,68 +274,16 @@ def semantic_similarity_between_subgraph_9(nodes_stu, nodes_ins, cache, ic):
     Each feature between two answer is the largest one among all of features
     calculated between every pair of nodes from each subgraph.
     """
-    # words_stu = list(map(lambda node: node.split(':')[0], nodes_stu))
-    # words_ins = list(map(lambda node: node.split(':')[0], nodes_ins))
-
-    # print("words: ", words_stu)
-    # start = time.time()
     f_shortest_path = similarity_subgraph(wn.path_similarity, nodes_stu, nodes_ins, cache)
-    # time0 = time.time()
     f_lch = similarity_subgraph(wn.lch_similarity, nodes_stu, nodes_ins, cache)
-    # time1 = time.time()
     f_wup = similarity_subgraph(wn.wup_similarity, nodes_stu, nodes_ins, cache)
-    # time2 = time.time()
     f_res = similarity_subgraph(wn.res_similarity, nodes_stu, nodes_ins, cache, ic=ic)
-    # time3 = time.time()
     f_lin = similarity_subgraph(wn.lin_similarity, nodes_stu, nodes_ins, cache, ic=ic)
-    # time4 = time.time()
     f_jcn = similarity_subgraph(wn.jcn_similarity, nodes_stu, nodes_ins, cache, ic=ic)
-    # time5 = time.time()
     f_lesk = similarity_subgraph(overlap, nodes_stu, nodes_ins, cache)
-    # time6 = time.time()
     f_hso = 1  # TODO: Update the algorithm
     f_lsa = 1  # TODO: Update the algorithm
-    # end = time.time()
-    # print(
-    #     'path: {:.2f}, lch: {:.2f}, wup: {:.2f}, res: {:.2f}, lin: {:.2f}, jcn: {:.2f}, lesk: {:.2f}, f9:: {:.2f}'.format(
-    #         time0-start, time1-time0, time2-time1, time3-time2, time4-time3, time5-time4, time6-time5, end-start
-    #     )
-    # )
     return [f_shortest_path, f_lch, f_wup, f_res, f_lin, f_jcn, f_lesk, f_hso, f_lsa]
-
-
-# def semantic_similarity_between_nodes_9(node_stu, node_ins):
-#     """
-#     Node-level similarity.
-#     Calculate 9 knowledge based features for input nodes in form of 'word:pos:loc'
-#     8 of them is word-net features and the last one is las
-#     node_stu, node_ins:
-#         node from student answers and instructor answers
-#     """
-#     word_stu = node_stu.split(":")[0]
-#     word_ins = node_ins.split(":")[0]
-#     f_shortest_path = similarity_word(wn.path_similarity, word_stu, word_ins)
-#     f_lch = similarity_word(wn.lch_similarity, word_stu, word_ins)
-#     f_wup = similarity_word(wn.wp_similarity, word_stu, word_ins)
-#     f_res = similarity_word(wn.res_similarity, word_stu, word_ins)
-#     f_lin = similarity_word(wn.lin_similarity, word_stu, word_ins)
-#     f_jcn = similarity_word(wn.lin_similarity, word_stu, word_ins)
-#     f_lesk = similarity_word(overlap, word_stu, word_ins)
-#     f_hso = 1  # TODO: Update the algorithm
-#
-#     # For the corpus-based measures, we create a vector for
-#     # each answer by summing the vectors associated with each
-#     # word in the answer-ignoring stopwords. We produce a
-#     # score in the range [0..1] based upon the cosine similarity
-#     # between the student and instructor answer vectors. The LSA
-#     # model used in these experiments was built by training Infomap
-#     # on a subset of Wikipedia articles that contain one or more
-#     # common computer science terms. Since ESA uses Wikipedia
-#     # article associa- tions as vector features, it was trained
-#     # using a full Wikipedia dump.
-#     f_lsa = 1  # TODO: Update the algorithm
-#     return [f_shortest_path, f_lch, f_wup, f_res,
-#             f_lin, f_jcn, f_lesk, f_hso, f_lsa]
 
 
 def phi(node_stu, ans_stu, node_ins, ans_ins, cache, ic):
@@ -335,7 +295,6 @@ def phi(node_stu, ans_stu, node_ins, ans_ins, cache, ic):
     # for the knowledge-based measures, we use the maximum semantic similarity
     # - for each open-class word - that can be obtained by pairing
     # it up with individual open-class words in the second input text.
-    # print('Calculating phi...')
     subgraphs_stu = ans_stu.subgraph[node_stu]  # subgraphs of node_stu
     subgraphs_ins = ans_ins.subgraph[node_ins]  # subgraphs of node_ins
     features_68 = []
@@ -343,16 +302,15 @@ def phi(node_stu, ans_stu, node_ins, ans_ins, cache, ic):
         subgraph_stu = subgraphs_stu[i]
         subgraph_ins = subgraphs_ins[i]
         features_68.extend(semantic_similarity_between_subgraph_9(subgraph_stu, subgraph_ins, cache, ic))
-    features_68.extend(lexicosyntactic_featrues_32(node_stu, ans_stu, node_ins, ans_ins, cache))
+    features_68.extend(lexico_syntactic_features_32(node_stu, ans_stu, node_ins, ans_ins, cache))
     return np.array(features_68)
 
 
-def lexicosyntactic_featrues_32(node_stu, ans_stu, node_ins, ans_ins, cache):
+def lexico_syntactic_features_32(node_stu, ans_stu, node_ins, ans_ins, cache):
     """
     lexico syntactic features (32 dimensions)
     This features are for N3, meaning just for the single node.
     """
-    # print(node_stu)
     word_stu, pos_stu, loc_stu = node_stu.split(':')
     word_ins, pos_ins, loc_ins = node_ins.split(':')
     feature_32 = []
@@ -457,6 +415,7 @@ def lexicosyntactic_featrues_32(node_stu, ans_stu, node_ins, ans_ins, cache):
         f_role_based = cache[c_key]['ontological']
     else:
         f_role_based = [0, ] * 3
+
         def rolebased(node, ans, role):
             for e in ans.edges:
                 if e[1] == node:
@@ -465,6 +424,7 @@ def lexicosyntactic_featrues_32(node_stu, ans_stu, node_ins, ans_ins, cache):
                     if role == 'verb' and e[2].split(':')[1].startswith('VB'):
                         return True
             return False
+
         if rolebased(node_stu, ans_stu, 'sub') and rolebased(node_ins, ans_ins, 'sub'):
             f_role_based[0] = 1
         if rolebased(node_stu, ans_stu, 'obj') and rolebased(node_ins, ans_ins, 'obj'):
@@ -755,15 +715,6 @@ def generate_feature_g(ans_stu, ans_ins, que, w_phi, cache, ic):
     Output:
         A list of feature (30-dimension feature vector)
     """
-    # # Node to node
-    # node_to_node_similarity = {}
-    # for node_stu in ans_stu.nodes:
-    #     for node_ins in ans_ins.nodes:
-    #         ssf_32 = semantic_similarity_featrues_32(ans_stu, ans_ins, node_stu, node_ins)
-    #         kbf_36 = knowledge_based_features_36(ans_stu, ans_ins)
-    #         feature_68 = np.append(ssf_32, kbf_36)
-    #         sim = w.dot(feature_68)
-    #         node_to_node_similarity[node_stu][node_ins] = sim
 
     # feature vector for SVM and SVMRANK
     # 8 knowledge based measures of semantic similarity + 2 corpus based measures
@@ -784,16 +735,6 @@ def generate_feature_b(ans_stu, ans_ins, que, w_phi, cache, ic):
     Output:
         A list of feature (30-dimension feature vector)
     """
-    # # Node to node
-    # node_to_node_similarity = {}
-    # for node_stu in ans_stu.nodes:
-    #     for node_ins in ans_ins.nodes:
-    #         ssf_32 = semantic_similarity_featrues_32(ans_stu, ans_ins, node_stu, node_ins)
-    #         kbf_36 = knowledge_based_features_36(ans_stu, ans_ins)
-    #         feature_68 = np.append(ssf_32, kbf_36)
-    #         sim = w.dot(feature_68)
-    #         node_to_node_similarity[node_stu][node_ins] = sim
-
     # feature vector for SVM and SVMRANK
     # 8 knowledge based measures of semantic similarity + 2 corpus based measures
     # +1 tf*idf weights ==> 11 dimension feature vector
@@ -825,6 +766,7 @@ def generate_feature_b(ans_stu, ans_ins, que, w_phi, cache, ic):
     print('features_22: ', features_22)
     return features_22
 
+
 def generate_feature(ans_stu, ans_ins, que, w_phi, cache, ic):
     """
     Generate feature for each student answer.
@@ -834,19 +776,6 @@ def generate_feature(ans_stu, ans_ins, que, w_phi, cache, ic):
     Output:
         A list of feature (30-dimension feature vector)
     """
-    # # Node to node
-    # node_to_node_similarity = {}
-    # for node_stu in ans_stu.nodes:
-    #     for node_ins in ans_ins.nodes:
-    #         ssf_32 = semantic_similarity_featrues_32(ans_stu, ans_ins, node_stu, node_ins)
-    #         kbf_36 = knowledge_based_features_36(ans_stu, ans_ins)
-    #         feature_68 = np.append(ssf_32, kbf_36)
-    #         sim = w.dot(feature_68)
-    #         node_to_node_similarity[node_stu][node_ins] = sim
-
-    # feature vector for SVM and SVMRANK
-    # 8 knowledge based measures of semantic similarity + 2 corpus based measures
-    # +1 tf*idf weights ==> 11 dimension feature vector
 
     psi_b_kbfa_8 = knowledge_based_feature_between_sentence_8(ans_stu.words, ans_ins.words, cache)
     psi_b_la = 1  # TODO: lsa between two sentence?
@@ -950,10 +879,7 @@ def generate_features(que_id, w_phi, cache, ic, fn_ans_ins='answers', fn_que='qu
     with open(sys.path[0] + '/features/' + que_id,
               'wt') as f:  # , open(sys.path[0]+'/../data/scores/'+que_id+'/ave') as fs:
         for ans_stu in ans_stu_s:
-            # score = fs.readline().strip()
             feature = generate_feature_b(ans_stu, ans_ins, que, w_phi, cache, ic)
-            # feature.insert(0, score)
-            # features.append(feature)
             print(','.join(map(str, feature)), file=f)
 
 
@@ -967,7 +893,8 @@ def run_procerpron_learning():
         with open('w' + str(epochs), 'w') as f:
             print(','.join(map(str, w)), file=f)
 
-def run_gen_features(qids = 'all', fw = 'w50'):
+
+def run_gen_features(qids='all', fw='w50'):
     with open(fw, 'r') as f:
         w_string = f.readline()
         print('w: ', w_string)
@@ -980,6 +907,7 @@ def run_gen_features(qids = 'all', fw = 'w50'):
     print(qids)
     for qid in qids:
         generate_features(qid, w_phi, similarity_cache, ic)
+
 
 def read_training_data(feature_path):
     '''
@@ -995,7 +923,7 @@ def read_training_data(feature_path):
     #   }
     # }
     '''
-    scores_truth_path = sys.path[0] + '/../data/scores/'
+    scores_truth_path = DATA_PATH + '/scores/'
     que_ids = os.listdir(feature_path)
     data_dict = {}
     for que_id in que_ids:
@@ -1013,10 +941,11 @@ def read_training_data(feature_path):
             data_dict[que_id]['diff'] = diff
     return data_dict
 
+
 def run_svr(fn, feature_type, reliable):
     # When `reliable` is True, answers whose score is with diff over 2 will be removed
     # from training data
-    feature_path = sys.path[0] + '/features_{}/'.format(feature_type)
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
 
     with open(fn, 'w') as fr:
@@ -1028,7 +957,8 @@ def run_svr(fn, feature_type, reliable):
                 features_all = []
                 scores_all = []
                 for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array([True] * len(data_dict[qid]['diff']))
+                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
+                        [True] * len(data_dict[qid]['diff']))
                     if qid != que_id:
                         scores_truth = data_dict[qid]['scores_truth'][array_filter]
                         features = data_dict[qid]['features'][array_filter]
@@ -1048,7 +978,7 @@ def run_svr(fn, feature_type, reliable):
                 clf = SVR()
                 clf.fit(X, Y)
 
-                #predict
+                # predict
                 score = clf.predict(feature_i)
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
@@ -1058,6 +988,7 @@ def run_svr(fn, feature_type, reliable):
                 print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
 
+
 def run_svr_question_wise(fn, feature_type, reliable):
     '''
     Train SVR model for each answer with all the other answers under the same question.
@@ -1065,14 +996,14 @@ def run_svr_question_wise(fn, feature_type, reliable):
     from training data
     '''
 
-    feature_path = sys.path[0] + '/features_{}/'.format(feature_type)
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
 
     with open(fn, 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
-            # i refers an answer
-            # Train svr for each answer with all other answers
+                # i refers an answer
+                # Train svr for each answer with all other answers
 
                 # remove unreliable training data
                 array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
@@ -1100,6 +1031,7 @@ def run_svr_question_wise(fn, feature_type, reliable):
                 print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
 
+
 def run_knn(fn, feature_type, reliable, n_neighbors, weight):
     '''
     Run knn algorithm using all other answers as training data.
@@ -1119,29 +1051,9 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight):
             and returns an array of the same shape containing the weights.
     :return: None
     '''
-    #
 
-    # feature_path = sys.path[0] + '/features_b/'
-    # scores_truth_path = sys.path[0] + '/../data/scores/'
-    # que_ids = os.listdir(feature_path)
-    # data_dict = {}
-    # for que_id in que_ids:
-    #     data_dict[que_id] = {}
-    #     with open(feature_path + que_id, 'r') as ff, \
-    #             open(scores_truth_path + que_id + '/ave') as fs, \
-    #             open(scores_truth_path + que_id + '/diff') as fd:
-    #         scores_truth = np.array(list(map(np.float64, fs.readlines())))
-    #         diff = np.array(list(map(np.float64, fd.readlines())))
-    #         features = list(map(lambda s: s.split(','), ff.readlines()))
-    #         features = np.array(list(map(lambda l: list(map(np.float64, l)), features)))
-    #
-    #         data_dict[que_id]['scores_truth'] = scores_truth
-    #         data_dict[que_id]['features'] = features
-    #         data_dict[que_id]['diff'] = diff
-
-    feature_path = sys.path[0] + '/features_{}/'.format(feature_type)
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
-
 
     with open(fn, 'w') as fr:
         for que_id in data_dict:
@@ -1152,7 +1064,8 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight):
                 features_all = []
                 scores_all = []
                 for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array([True] * len(data_dict[qid]['diff']))
+                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
+                        [True] * len(data_dict[qid]['diff']))
                     if qid != que_id:
                         scores_truth = data_dict[qid]['scores_truth'][array_filter]
                         features = data_dict[qid]['features'][array_filter]
@@ -1172,7 +1085,7 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight):
                 clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
                 clf.fit(X, Y)
 
-                #predict
+                # predict
                 score = clf.predict(feature_i) / 2
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
@@ -1181,6 +1094,7 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight):
                                                                   error_abs, error_round))
                 print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
+
 
 def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
     '''
@@ -1202,7 +1116,7 @@ def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
     :return: None
     '''
 
-    feature_path = sys.path[0] + '/features_{}/'.format(feature_type)
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
 
     with open(fn, 'w') as fr:
@@ -1238,6 +1152,7 @@ def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
                 print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
 
+
 def score_question_wise(fn, clf, feature_type, reliable=True):
     '''
     Train SVR model for each answer with all the other answers under the same question.
@@ -1245,7 +1160,7 @@ def score_question_wise(fn, clf, feature_type, reliable=True):
     from training data
     '''
 
-    feature_path = sys.path[0] + '/features_{}/'.format(feature_type)
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
 
     with open(fn, 'w') as fr:
@@ -1280,11 +1195,12 @@ def score_question_wise(fn, clf, feature_type, reliable=True):
                 print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
 
-def score(fn, clf, feature_type, reliable = True):
+
+def score(fn, clf, feature_type, reliable=True):
     # When `reliable` is True, answers whose score is with diff over 2 will be removed
     # from training data
 
-    feature_path = sys.path[0] + '/features_{}/'.format(feature_type)
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
 
     with open(fn, 'w') as fr:
@@ -1296,7 +1212,8 @@ def score(fn, clf, feature_type, reliable = True):
                 features_all = []
                 scores_all = []
                 for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array([True] * len(data_dict[qid]['diff']))
+                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
+                        [True] * len(data_dict[qid]['diff']))
                     if qid != que_id:
                         scores_truth = data_dict[qid]['scores_truth'][array_filter]
                         features = data_dict[qid]['features'][array_filter]
@@ -1313,7 +1230,7 @@ def score(fn, clf, feature_type, reliable = True):
                 feature_i = data_dict[que_id]['features'][i:i + 1]
                 clf.fit(X, Y)
 
-                #predict
+                # predict
                 score = clf.predict(feature_i) / 2
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
@@ -1322,39 +1239,46 @@ def score(fn, clf, feature_type, reliable = True):
                                                                   error_abs, error_round))
                 print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
-def score_svr(fn='svr.all', reliable = True):
+
+
+def score_svr(fn='svr.all', reliable=True):
     clf = SVR()
     score(fn, clf, reliable)
 
-def score_svr_question_wise(fn='svr.all', reliable = True):
+
+def score_svr_question_wise(fn='svr.all', reliable=True):
     clf = SVR()
     score_question_wise(fn, clf, reliable)
+
 
 def score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='distance'):
     clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
     score(fn, clf, feature_type, reliable)
 
+
 def score_knn_question_wise(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='distance'):
     clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
     score_question_wise(fn, clf, feature_type, reliable)
+
 
 def count_error(fn):
     # with open(fn, 'r') as fe, open('error.count.txt', 'w') as ec,\
     #         open('error_abs.count.txt', 'w') as eac,\
     #         open('error_round.count.txt', 'w') as erc:
-    out_path = os.path.split(fn)[0]
+    out_path = SCRIPT_PATH
 
-    with open(fn, 'r') as fe, open(out_path+'/errors.txt', 'w') as fo:
-        svr_all = map(lambda line:line.split(':'), fe.readlines())
+    with open(fn, 'r') as fe, open(out_path + '/errors.txt', 'w') as fo:
+        svr_all = map(lambda line: line.split(':'), fe.readlines())
         _, _, _, error, error_abs, error_round = zip(*svr_all)
         count = len(error)
         error = map(float, error)
         error_abs = map(float, error_abs)
         error_round = map(float, error_round)
+
         def count_hist(error, echo=False):
             k = list(np.arange(-4.5, 5.1, 0.5))
             v = [0] * 20
-            hist = dict(zip(k,v))
+            hist = dict(zip(k, v))
             for e in error:
                 for k in hist:
                     if e <= k:
@@ -1369,21 +1293,20 @@ def count_error(fn):
         d_error_abs = count_hist(error_abs)
         d_error_round = count_hist(error_round)
         errors = zip(d_error.keys(), d_error.values(), d_error_abs.values(), d_error_round.values())
-        errors = map(lambda line: '\t'.join(map(str, line))+'\n', errors)
+        errors = map(lambda line: '\t'.join(map(str, line)) + '\n', errors)
         fo.writelines(errors)
         fo.write('{}\t{}\t{}\t{}\n'.format(count, sum(d_error.values()), sum(d_error_abs.values()),
                                            sum(d_error_round.values())))
 
 
 if __name__ == '__main__':
-
     # run_procerpron_learning()
     # run_gen_features()
     # run_svr(fn='svr.all', feature_type='gb', reliable=False)
     # run_svr_question_wise(fn='svr.all', feature_type='gb', reliable=True)
-    # run_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
+    run_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
     # run_knn_question_wise(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='uniform')
-    score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
+    # score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
     # count_error('./knn.all')
     # count_error('result/gb.knn5.uniform.reliable.171005/result')
     # count_error('result/gb.knn.distance.reliable.q_wise.171004/result')
