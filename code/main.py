@@ -10,7 +10,7 @@ import nltk
 import string
 import os
 # import progressbar
-
+import time
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn import neighbors
 from nltk.stem.porter import PorterStemmer
@@ -139,6 +139,10 @@ class Sentence:
         return nodes
 
 
+def cur_time():
+    return time.strftime('%Y%m%d%H%M%S', time.localtime(time.time()))
+
+
 def overlap(syn1, syn2):
     def1 = set([word for word in re.split(r'[^a-zA-Z]', syn1.definition()) if word])
     def2 = set([word for word in re.split(r'[^a-zA-Z]', syn2.definition()) if word])
@@ -256,7 +260,7 @@ def knowledge_based_feature_between_sentence_8(nodes_stu, nodes_ins, cache):
     f_wup = similarity_subgraph(wn.wup_similarity, nodes_stu, nodes_ins, cache)
     f_res = similarity_subgraph(wn.res_similarity, nodes_stu, nodes_ins, cache)
     f_lin = similarity_subgraph(wn.lin_similarity, nodes_stu, nodes_ins, cache)
-    f_jcn = similarity_subgraph(wn.lin_similarity, nodes_stu, nodes_ins, cache)
+    f_jcn = similarity_subgraph(wn.jcn_similarity, nodes_stu, nodes_ins, cache)
     f_lesk = similarity_subgraph(overlap, nodes_stu, nodes_ins, cache)
     f_hso = 1  # TODO: Update the algorithm
 
@@ -810,7 +814,7 @@ def generate_feature(ans_stu, ans_ins, que, w_phi, cache, ic):
     return features_30
 
 
-def generate_features(que_id, w_phi, cache, ic, fn_ans_ins='answers', fn_que='questions'):
+def generate_features(que_id, w_phi, cache, ic, feature_type, fn_ans_ins='answers', fn_que='questions'):
     """
     Input:
         A parse file of dependence graph. One student answer each line.
@@ -822,9 +826,9 @@ def generate_features(que_id, w_phi, cache, ic, fn_ans_ins='answers', fn_que='qu
         The que_id will be used to locate the answer and question files.
         It must be the NO. of q/a.
     """
-    path_fn_ans_stu = '../data/parses/stanford.trip/' + que_id
-    path_fn_ans_ins = '../data/parses/stanford.trip/' + fn_ans_ins
-    path_fn_que = '../data/parses/stanford.trip/' + fn_que
+    path_fn_ans_stu = DATA_PATH + '/parses/stanford.trip/' + que_id
+    path_fn_ans_ins = DATA_PATH + '/parses/stanford.trip/' + fn_ans_ins
+    path_fn_que = DATA_PATH + '/parses/stanford.trip/' + fn_que
     print("On processing: " + path_fn_ans_stu)
     print("Instructor file is: " + path_fn_ans_ins)
     ans_ins, ans_stu_s, que = None, None, None
@@ -874,12 +878,19 @@ def generate_features(que_id, w_phi, cache, ic, fn_ans_ins='answers', fn_que='qu
     # Also tf-idf vector need to be trained in advance.
     if not (ans_stu_s and ans_ins and que):
         return -1
-
-    # features = []
-    with open(sys.path[0] + '/features/' + que_id,
+    feature_path = RESULTS_PATH + '/features_' + feature_type
+    if not os.path.exists(feature_path):
+        os.mkdir(feature_path)
+    with open(feature_path + '/' + que_id,
               'wt') as f:  # , open(sys.path[0]+'/../data/scores/'+que_id+'/ave') as fs:
         for ans_stu in ans_stu_s:
-            feature = generate_feature_b(ans_stu, ans_ins, que, w_phi, cache, ic)
+            if feature_type == 'b':
+                feature = generate_feature_b(ans_stu, ans_ins, que, w_phi, cache, ic)
+            if feature_type == 'g':
+                feature = generate_feature_g(ans_stu, ans_ins, que, w_phi, cache, ic)
+            else:
+                feature = generate_feature(ans_stu, ans_ins, que, w_phi, cache, ic)
+
             print(','.join(map(str, feature)), file=f)
 
 
@@ -894,19 +905,20 @@ def run_procerpron_learning():
             print(','.join(map(str, w)), file=f)
 
 
-def run_gen_features(qids='all', fw='w50'):
+def run_gen_features(qids='all', fn_w='w', feature_type = 'gb'):
+    fw = RESULTS_PATH+'/' + fn_w
     with open(fw, 'r') as f:
         w_string = f.readline()
         print('w: ', w_string)
     w_phi = np.array(list(map(np.float64, w_string.split(','))))
     similarity_cache = {}
     ic = wic.ic('ic-bnc.dat')
-    path = sys.path[0] + '/../data/scores/'
+    path = DATA_PATH + '/scores/'
     if qids == 'all':
         qids = os.listdir(path)
     print(qids)
     for qid in qids:
-        generate_features(qid, w_phi, similarity_cache, ic)
+        generate_features(qid, w_phi, similarity_cache, ic, feature_type)
 
 
 def read_training_data(feature_path):
@@ -942,7 +954,7 @@ def read_training_data(feature_path):
     return data_dict
 
 
-def run_svr(fn, feature_type, reliable):
+def run_svr(fn, feature_type, reliable, training_scale = 0):
     # When `reliable` is True, answers whose score is with diff over 2 will be removed
     # from training data
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
@@ -952,8 +964,8 @@ def run_svr(fn, feature_type, reliable):
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers the answer to be scored
-
                 # Train svr for each answer with all other answers
+                scale = 0
                 features_all = []
                 scores_all = []
                 for qid in data_dict:
@@ -970,6 +982,9 @@ def run_svr(fn, feature_type, reliable):
                         # features = np.delete(data_dict[qid]['features'], i, 0)
                     features_all.append(np.array(features))
                     scores_all.append(np.array(scores_truth))
+                    if scale > training_scale > 0:
+                        print('scale: ', scale)
+                        break
                 X = np.concatenate(features_all)
                 Y = np.concatenate(scores_all)
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
@@ -1032,7 +1047,7 @@ def run_svr_question_wise(fn, feature_type, reliable):
                                                                   error_abs, error_round), file=fr)
 
 
-def run_knn(fn, feature_type, reliable, n_neighbors, weight):
+def run_knn(fn, feature_type, reliable, n_neighbors, weight, training_scale = 0):
     '''
     Run knn algorithm using all other answers as training data.
     :param fn: File name to save the results.
@@ -1058,9 +1073,9 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight):
     with open(fn, 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an answer
-
-                # Train svr for each answer with all other answers
+                # i refers an student answer
+                # Train knn for each answer with all other answers
+                scale = 0
                 features_all = []
                 scores_all = []
                 for qid in data_dict:
@@ -1077,6 +1092,10 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight):
                         # features = np.delete(data_dict[qid]['features'], i, 0)
                     features_all.append(np.array(features))
                     scores_all.append(np.array(scores_truth))
+                    scale += len(features)
+                    if scale>training_scale>0:
+                        print('scale: ', scale)
+                        break
                 X = np.concatenate(features_all)
                 Y = np.concatenate(scores_all)
                 Y = (Y * 2).astype(int)
@@ -1265,9 +1284,9 @@ def count_error(fn):
     # with open(fn, 'r') as fe, open('error.count.txt', 'w') as ec,\
     #         open('error_abs.count.txt', 'w') as eac,\
     #         open('error_round.count.txt', 'w') as erc:
-    out_path = SCRIPT_PATH
+    out_path = RESULTS_PATH + '/errors'
 
-    with open(fn, 'r') as fe, open(out_path + '/errors.txt', 'w') as fo:
+    with open(fn, 'r') as fe, open(out_path + '/err.' + fn, 'w') as fo:
         svr_all = map(lambda line: line.split(':'), fe.readlines())
         _, _, _, error, error_abs, error_round = zip(*svr_all)
         count = len(error)
@@ -1275,11 +1294,11 @@ def count_error(fn):
         error_abs = map(float, error_abs)
         error_round = map(float, error_round)
 
-        def count_hist(error, echo=False):
+        def count_hist(error_hist, echo=False):
             k = list(np.arange(-4.5, 5.1, 0.5))
             v = [0] * 20
             hist = dict(zip(k, v))
-            for e in error:
+            for e in error_hist:
                 for k in hist:
                     if e <= k:
                         hist[k] += 1
@@ -1301,10 +1320,10 @@ def count_error(fn):
 
 if __name__ == '__main__':
     # run_procerpron_learning()
-    # run_gen_features()
+    run_gen_features()
     # run_svr(fn='svr.all', feature_type='gb', reliable=False)
     # run_svr_question_wise(fn='svr.all', feature_type='gb', reliable=True)
-    run_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
+    # run_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform', training_scale=60)
     # run_knn_question_wise(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='uniform')
     # score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
     # count_error('./knn.all')
