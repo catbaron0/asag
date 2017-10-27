@@ -22,7 +22,15 @@ LEVENSHTEIN = 3
 # Paths
 SCRIPT_PATH = os.path.dirname(__file__)
 DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
-RESULTS_PATH = SCRIPT_PATH + "/../results"
+# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
+# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
+# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-answers"
+# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
+RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_uq"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ua"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
 
 
 class Sentence:
@@ -315,8 +323,21 @@ def lexico_syntactic_features_32(node_stu, ans_stu, node_ins, ans_ins, cache):
     lexico syntactic features (32 dimensions)
     This features are for N3, meaning just for the single node.
     """
-    word_stu, pos_stu, loc_stu = node_stu.split(':')
-    word_ins, pos_ins, loc_ins = node_ins.split(':')
+    try:
+        word_stu, pos_stu, loc_stu = node_stu.split(':')
+
+    except:
+        print("!!!!!stu!!!!!")
+        print(node_stu)
+        exit(-1)
+
+    try:
+        word_ins, pos_ins, loc_ins = node_ins.split(':')
+    except:
+        print("!!!!ins!!!!")
+        print(node_ins)
+        exit(-1)
+
     feature_32 = []
     c_key = ans_stu.id + ',' + node_stu + ',' + node_ins
     # RootMatch: 5d / Is a ROOT node matched to: ROOT, N, V, JJ, or Other
@@ -503,8 +524,8 @@ def perceptron_train(cache, ic, epochs=50, fn_ans='answers', fn_que='questions')
         File names of answers and questions.
     """
     training_data = {}
-    path_parse_file = '../data/parses/stanford.trip/'
-    path_data_file = '../data/annotations/'
+    path_parse_file = DATA_PATH + '/parses/'
+    path_data_file = DATA_PATH + '/annotations/'
     file_list = os.listdir(path_data_file)
     for fn in file_list:
         if fn.endswith('.pl'):
@@ -810,7 +831,7 @@ def generate_feature(ans_stu, ans_ins, que, w_phi, cache, ic):
     features_30 = psi_g_8
     features_30.extend(psi_b_11_with_demoting)
     features_30.extend(psi_b_11_without_demoting)
-    print('Features:', features_30)
+    # print('Features:', features_30)
     return features_30
 
 
@@ -826,9 +847,9 @@ def generate_features(que_id, w_phi, cache, ic, feature_type, fn_ans_ins='answer
         The que_id will be used to locate the answer and question files.
         It must be the NO. of q/a.
     """
-    path_fn_ans_stu = DATA_PATH + '/parses/stanford.trip/' + que_id
-    path_fn_ans_ins = DATA_PATH + '/parses/stanford.trip/' + fn_ans_ins
-    path_fn_que = DATA_PATH + '/parses/stanford.trip/' + fn_que
+    path_fn_ans_stu = DATA_PATH + '/parses/' + que_id
+    path_fn_ans_ins = DATA_PATH + '/parses/' + fn_ans_ins
+    path_fn_que = DATA_PATH + '/parses/' + fn_que
     print("On processing: " + path_fn_ans_stu)
     print("Instructor file is: " + path_fn_ans_ins)
     ans_ins, ans_stu_s, que = None, None, None
@@ -916,6 +937,7 @@ def run_gen_features(qids='all', fn_w='w', feature_type = 'gb'):
     path = DATA_PATH + '/scores/'
     if qids == 'all':
         qids = os.listdir(path)
+    # qids = ['LF_33b']
     print(qids)
     for qid in qids:
         generate_features(qid, w_phi, similarity_cache, ic, feature_type)
@@ -959,8 +981,12 @@ def run_svr(fn, feature_type, reliable, training_scale = 0):
     # from training data
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
+    fn = '{}.{}.{}.{}.{}'.format(feature_type, fn, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
 
-    with open(fn, 'w') as fr:
+    with open(result_path + '/result', 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers the answer to be scored
@@ -982,8 +1008,9 @@ def run_svr(fn, feature_type, reliable, training_scale = 0):
                         # features = np.delete(data_dict[qid]['features'], i, 0)
                     features_all.append(np.array(features))
                     scores_all.append(np.array(scores_truth))
-                    if scale > training_scale > 0:
-                        print('scale: ', scale)
+                    scale += len(features)
+                    if scale >= training_scale > 0:
+                        # print('scale: ', scale)
                         break
                 X = np.concatenate(features_all)
                 Y = np.concatenate(scores_all)
@@ -1047,7 +1074,7 @@ def run_svr_question_wise(fn, feature_type, reliable):
                                                                   error_abs, error_round), file=fr)
 
 
-def run_knn(fn, feature_type, reliable, n_neighbors, weight, training_scale = 0):
+def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale = 0):
     '''
     Run knn algorithm using all other answers as training data.
     :param fn: File name to save the results.
@@ -1069,8 +1096,14 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight, training_scale = 0)
 
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
+    # fn = fn +  '.' + feature_type + '.' +  cur_time()
+    fn = '{}.{}.{}.{}.{}.{}.{}.{}'.format(feature_type, fn, n_neighbors, p,
+                                          'reliable' if reliable else 'unreliable', weight, training_scale, cur_time())
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
 
-    with open(fn, 'w') as fr:
+    with open(result_path + '/result', 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers an student answer
@@ -1093,7 +1126,7 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight, training_scale = 0)
                     features_all.append(np.array(features))
                     scores_all.append(np.array(scores_truth))
                     scale += len(features)
-                    if scale>training_scale>0:
+                    if scale >= training_scale > 0:
                         print('scale: ', scale)
                         break
                 X = np.concatenate(features_all)
@@ -1101,7 +1134,7 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight, training_scale = 0)
                 Y = (Y * 2).astype(int)
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
                 feature_i = data_dict[que_id]['features'][i:i + 1]
-                clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
+                clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight, p=p)
                 clf.fit(X, Y)
 
                 # predict
@@ -1134,7 +1167,7 @@ def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
             and returns an array of the same shape containing the weights.
     :return: None
     '''
-
+    #TODO: update the parameters
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
 
@@ -1181,7 +1214,8 @@ def score_question_wise(fn, clf, feature_type, reliable=True):
 
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
-
+    fn = RESULTS_PATH + '/' + fn + '.' + cur_time()
+    print(fn)
     with open(fn, 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
@@ -1284,9 +1318,10 @@ def count_error(fn):
     # with open(fn, 'r') as fe, open('error.count.txt', 'w') as ec,\
     #         open('error_abs.count.txt', 'w') as eac,\
     #         open('error_round.count.txt', 'w') as erc:
-    out_path = RESULTS_PATH + '/errors'
+    result_path = RESULTS_PATH + '/results/' + fn
 
-    with open(fn, 'r') as fe, open(out_path + '/err.' + fn, 'w') as fo:
+    with open(result_path + '/result' , 'r') as fe, \
+            open(result_path + '/errors', 'w') as fo:
         svr_all = map(lambda line: line.split(':'), fe.readlines())
         _, _, _, error, error_abs, error_round = zip(*svr_all)
         count = len(error)
@@ -1317,17 +1352,35 @@ def count_error(fn):
         fo.write('{}\t{}\t{}\t{}\n'.format(count, sum(d_error.values()), sum(d_error_abs.values()),
                                            sum(d_error_round.values())))
 
+def remove_scores():
+    cur_path = sys.path[0]
+    scores_path = DATA_PATH + "/scores/"
+    scores = os.listdir(scores_path)
+    for score_path in scores:
+        me = scores_path + score_path + "/me"
+        other = scores_path + score_path + "/other"
+        diff = scores_path+ score_path + '/diff'
+        print('me: ', me)
+        print('other: ', other)
+        with open(me, 'r') as fm, open(other, 'r') as fo, open(diff, 'w') as fd:
+            score_me = np.array(list(map(float, fm.readlines())))
+            score_other = np.array(list(map(float, fo.readlines())))
+            fd.writelines('\n'.join(list(map(str, abs(score_me - score_other)))))
 
 if __name__ == '__main__':
     # run_procerpron_learning()
-    run_gen_features()
-    # run_svr(fn='svr.all', feature_type='gb', reliable=False)
+    # run_gen_features()
+    # remove_scores()
+    for scale in range(100, 2100, 100):
+        print('scale:', scale)
+        run_svr(fn='svr', feature_type='gb', reliable=False, training_scale=scale)
     # run_svr_question_wise(fn='svr.all', feature_type='gb', reliable=True)
-    # run_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform', training_scale=60)
+    # for k in range(400, 2100, 100):
+    #     run_knn(fn='knn', feature_type='gb', reliable=False, n_neighbors=10, weight='uniform', p=2, training_scale=0)
     # run_knn_question_wise(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='uniform')
     # score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
     # count_error('./knn.all')
-    # count_error('result/gb.knn5.uniform.reliable.171005/result')
+    # count_error('gb.knn.10.unreliable.uniform.0.20171027114216')
     # count_error('result/gb.knn.distance.reliable.q_wise.171004/result')
     # count_error('result/gb.knn.uniform.reliable.171004/result')
     # count_error('result/gb.knn.uniform.reliable.q_wise.171004/result')
