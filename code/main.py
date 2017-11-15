@@ -1,5 +1,9 @@
 from nltk.corpus import wordnet as wn
 from nltk.corpus import wordnet_ic as wic
+from sklearn.metrics import mean_squared_error
+from sklearn.cluster import KMeans
+
+from math import sqrt
 import re
 import sys
 import numpy as np
@@ -20,7 +24,7 @@ from sklearn.svm import SVR
 LEVENSHTEIN = 3
 
 # Paths
-SCRIPT_PATH = os.path.dirname(__file__)
+SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
@@ -31,6 +35,9 @@ RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_uq"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ua"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
+
+RAW_PATH = DATA_PATH + "/raw"
+RAW_PATH_STU = DATA_PATH + "/raw/ans_stu"
 
 
 class Sentence:
@@ -730,6 +737,68 @@ def tf_idf_weight_answer_v(ans_stu, ans_ins, answer_demoting=False):
     tfidf_values = tfidf.transform([answer_pair])
     return [tfidf[0, col] for col in tfidf_values.nonzero()[1]]
 
+def get_tokens(text, gram=1):
+    lower = text.lower()
+    remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
+    no_punctuation = lower.translate(remove_punctuation_map)
+    tokens = nltk.word_tokenize(no_punctuation)
+    return nltk.ngrams(tokens, gram)
+def read_tokens_answer(answer, gram=1):
+    # Answers are starts with answer id
+    # Remove answer id first before extract tokens
+    answer = answer[answer.find(' ') + 1:]
+    return set(get_tokens(answer, gram=gram))
+
+def read_tokens_answers(que_id, gram=1, ref = True):
+    '''
+    Read answers under one question and return a tuple of tokens.
+    The length of tuple of tokens is used as the length of BOW.
+    :param fn_question:
+    question id, it should be same to the file name.
+    :return:
+    '''
+    token_set = set()
+    if ref:
+        # read reference answer
+        with open(RAW_PATH + "/answers", errors="ignore") as f_ref:
+            for answer in f_ref.readlines():
+                if answer.startswith(que_id):
+                    token_set = token_set.union(read_tokens_answer(answer, gram=gram))
+                    break
+
+    # read student answers
+    with open(RAW_PATH_STU + "/" + que_id, "r", errors="ignore") as f_ans_raw:
+        try:
+            for answer in f_ans_raw.readlines():
+                token_set = token_set.union(read_tokens_answer(answer))
+        except:
+            print("error:", answer)
+    assert token_set
+    return token_set
+
+def generate_features_bow(grams = [1,], ref = True):
+
+    for que_id in os.listdir(RAW_PATH_STU):
+        print(que_id)
+
+        # generate bow features
+        feature_path = RESULTS_PATH+"/features_bow_{}gram/".format("-".join(map(str, grams)))
+        if not os.path.exists(feature_path):
+            os.makedirs(feature_path)
+
+        with open(feature_path +"/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea,\
+            open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
+            for answer in f_ans.readlines():
+                features = []
+                for gram in grams:
+                    tokens_all = tuple(read_tokens_answers(que_id, gram=gram, ref=ref))
+                    tokens_answer = read_tokens_answer(answer, gram=gram)
+                    bow = [1] * len(tokens_all)
+                    for i in range(len(tokens_all)):
+                        bow[i] = 1 if tokens_all[i] in tokens_answer else 0
+                    features.extend(bow)
+                print(*features, file=f_fea, sep=',')
+                # print(bow)
 
 def generate_feature_g(ans_stu, ans_ins, que, w_phi, cache, ic):
     """
@@ -964,17 +1033,34 @@ def read_training_data(feature_path):
         data_dict[que_id] = {}
         with open(feature_path + que_id, 'r') as ff, \
                 open(scores_truth_path + que_id + '/ave') as fs, \
+                open(RAW_PATH + "/answers", "r", errors="ignore") as f_raw_r, \
+                open(RAW_PATH + "/questions", "r", errors="ignore") as f_raw_q, \
+                open(RAW_PATH_STU + "/" + que_id, "r", errors="ignore") as f_raw_s, \
                 open(scores_truth_path + que_id + '/diff') as fd:
             scores_truth = np.array(list(map(np.float64, fs.readlines())))
             diff = np.array(list(map(np.float64, fd.readlines())))
             features = list(map(lambda s: s.split(','), ff.readlines()))
             features = np.array(list(map(lambda l: list(map(np.float64, l)), features)))
+            raw_r, raw_q, raw_s = '', '', []
+            for s in f_raw_q.readlines():
+                if s.startswith(que_id):
+                    raw_q = s
+                    break
+
+            for s in f_raw_r.readlines():
+                if s.startswith(que_id):
+                    raw_r = s
+                    break
+
+            raw_s = np.array(list(map(lambda s:s.strip(), f_raw_s.readlines())))
 
             data_dict[que_id]['scores_truth'] = scores_truth
             data_dict[que_id]['features'] = features
             data_dict[que_id]['diff'] = diff
+            data_dict[que_id]['question'] = raw_q.strip()
+            data_dict[que_id]['ans_ref'] = raw_r.strip()
+            data_dict[que_id]['ans_stu'] = raw_s
     return data_dict
-
 
 def run_svr(fn, feature_type, reliable, training_scale = 0):
     # When `reliable` is True, answers whose score is with diff over 2 will be removed
@@ -986,7 +1072,7 @@ def run_svr(fn, feature_type, reliable, training_scale = 0):
     if not os.path.exists(result_path):
         os.mkdir(result_path)
 
-    with open(result_path + '/result', 'w') as fr:
+    with open(result_path + '/result.txt', 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers the answer to be scored
@@ -1025,13 +1111,19 @@ def run_svr(fn, feature_type, reliable, training_scale = 0):
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
                 error_round = round(error_abs)
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round))
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round), file=fr)
+                question = data_dict[que_id]["question"]
+                ans_ref = data_dict[que_id]["ans_ref"]
+                ans_stu = data_dict[que_id]["ans_stu"][i]
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu), file=fr)
 
-
-def run_svr_question_wise(fn, feature_type, reliable):
+def run_svr_question_wise(fn, feature_type, reliable, training_scale = 0):
     '''
     Train SVR model for each answer with all the other answers under the same question.
     When `reliable` is True, answers whose score is with diff over 2 will be removed
@@ -1040,14 +1132,20 @@ def run_svr_question_wise(fn, feature_type, reliable):
 
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
+    fn = '{}.{}.{}.{}.{}'.format(feature_type, fn, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
 
-    with open(fn, 'w') as fr:
+    with open(result_path + '/result.txt', 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers an answer
-                # Train svr for each answer with all other answers
+                # Train svr for each answer with all other answers under the same question
 
                 # remove unreliable training data
+                scale = 0
+
                 array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
                     [True] * len(data_dict[que_id]['diff']))
                 # remove current answer (to be predicted)
@@ -1068,11 +1166,17 @@ def run_svr_question_wise(fn, feature_type, reliable):
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
                 error_round = round(error_abs)
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round))
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round), file=fr)
-
+                question = data_dict[que_id]["question"]
+                ans_ref = data_dict[que_id]["ans_ref"]
+                ans_stu = data_dict[que_id]["ans_stu"][i]
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu), file=fr)
 
 def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale = 0):
     '''
@@ -1103,7 +1207,7 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale
     if not os.path.exists(result_path):
         os.mkdir(result_path)
 
-    with open(result_path + '/result', 'w') as fr:
+    with open(result_path + '/result.txt', 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers an student answer
@@ -1131,9 +1235,12 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale
                         break
                 X = np.concatenate(features_all)
                 Y = np.concatenate(scores_all)
-                Y = (Y * 2).astype(int)
+                Y = (Y * 2).astype(int) # Here Y need to be int as a labels, that's why *2 is needed.
+                                        # Y comes from average scores of two ground truth, so there're .5 scores.
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
                 feature_i = data_dict[que_id]['features'][i:i + 1]
+                if n_neighbors > len(X):
+                    n_neighbors = len(X)
                 clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight, p=p)
                 clf.fit(X, Y)
 
@@ -1142,13 +1249,200 @@ def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
                 error_round = round(error_abs)
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round))
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round), file=fr)
+                question = data_dict[que_id]["question"]
+                ans_ref = data_dict[que_id]["ans_ref"]
+                ans_stu = data_dict[que_id]["ans_stu"][i]
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu), file=fr)
+
+def run_kmeans(fn, feature_type, reliable, k, training_scale = 0):
+    '''
+    Run knn algorithm using all other answers as training data.
+    :param fn: File name to save the results.
+    :param feature_type: For now it may be one of 'g', 'b' or 'gb'.
+    :param reliable:
+        When `reliable` is True, answers whose score is with diff over 2 will
+        be removed from training data
+    :param n_neighbors: Parameter for KNN. The number neighbors.
+    :param weight:
+        Weight function used in prediction. Possible values:
+        ‘uniform’ : uniform weights. All points in each neighborhood are weighted equally.
+        ‘distance’ : weight points by the inverse of their distance. in this case,
+            closer neighbors of a query point will have a greater influence than neighbors
+            which are further away.
+        [callable] : a user-defined function which accepts an array of distances,
+            and returns an array of the same shape containing the weights.
+    :return: None
+    '''
+
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
+    data_dict = read_training_data(feature_path)
+    # fn = fn +  '.' + feature_type + '.' +  cur_time()
+    fn = '{}.{}.{}.{}.{}.{}'.format(feature_type, fn, k, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
+
+    with open(result_path + '/result.txt', 'w') as fr:
+        for que_id in data_dict:
+            for i in range(len(data_dict[que_id]['scores_truth'])):
+                # i refers an student answer
+                # Train kmeans for each answer with all other answers
+                scale = 0
+                features_all = []
+                scores_all = []
+                for qid in data_dict:
+                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
+                        [True] * len(data_dict[qid]['diff']))
+                    if qid != que_id:
+                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
+                        features = data_dict[qid]['features'][array_filter]
+                    else:
+                        array_filter[i] = False
+                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
+                        features = data_dict[qid]['features'][array_filter]
+                        # scores_truth = np.delete(data_dict[qid]['scores_truth'], i, 0)
+                        # features = np.delete(data_dict[qid]['features'], i, 0)
+                    features_all.append(np.array(features))
+                    scores_all.append(np.array(scores_truth))
+                    scale += len(features)
+                    if scale >= training_scale > 0:
+                    #     print('scale: ', scale)
+                        break
+                X = np.concatenate(features_all)
+                Y = np.concatenate(scores_all)
+                Y = (Y * 2).astype(int)
+
+                score_truth_i = data_dict[que_id]['scores_truth'][i]
+                feature_i = data_dict[que_id]['features'][i:i + 1]
+
+                kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
+                label_i = kmeans.predict(feature_i)
+
+                # connect labels to scores
+                scores = Y[kmeans.labels_ == label_i[0]]
+                # print('socres:', scores)
+                # print('label_i', label)
+                count = len(scores)
+                score = sum(scores) / count / 2
+
+                # dict_score_label, dict_label_score = {}, {}
+                # for label in range(0, k):
+                #     scores = Y[kmeans.labels_==label]
+                #     count = len(scores)
+                #     dict_score_label[]
+                #     pass
 
 
-def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
+                # predict
+                # score = clf.predict(feature_i) / 2
+                error = score_truth_i - score
+                error_abs = abs(error)
+                error_round = round(error_abs)
+                question = data_dict[que_id]["question"]
+                ans_ref = data_dict[que_id]["ans_ref"]
+                ans_stu = data_dict[que_id]["ans_stu"][i]
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu), file=fr)
+
+def run_kmeans_question_wise(fn, feature_type, reliable, k, training_scale = 0):
+    '''
+    Run knn algorithm using all other answers as training data.
+    :param fn: File name to save the results.
+    :param feature_type: For now it may be one of 'g', 'b' or 'gb'.
+    :param reliable:
+        When `reliable` is True, answers whose score is with diff over 2 will
+        be removed from training data
+    :param n_neighbors: Parameter for KNN. The number neighbors.
+    :param weight:
+        Weight function used in prediction. Possible values:
+        ‘uniform’ : uniform weights. All points in each neighborhood are weighted equally.
+        ‘distance’ : weight points by the inverse of their distance. in this case,
+            closer neighbors of a query point will have a greater influence than neighbors
+            which are further away.
+        [callable] : a user-defined function which accepts an array of distances,
+            and returns an array of the same shape containing the weights.
+    :return: None
+    '''
+
+    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
+    data_dict = read_training_data(feature_path)
+    # fn = fn +  '.' + feature_type + '.' +  cur_time()
+    fn = '{}.{}.{}.{}.{}.{}'.format(feature_type, fn, k, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
+
+    with open(result_path + '/result.txt', 'w') as fr:
+        for que_id in data_dict:
+            for i in range(len(data_dict[que_id]['scores_truth'])):
+                # i refers an answer
+                # Train knn for each answer with all other answers
+
+                # remove unreliable training data
+                array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
+                    [True] * len(data_dict[que_id]['diff']))
+                # remove current answer (to be predicted)
+                array_filter[i] = False
+
+                scores_truth = data_dict[que_id]['scores_truth'][array_filter]
+                features = data_dict[que_id]['features'][array_filter]
+
+                X = features
+                Y = scores_truth
+                # Y = (Y * 2).astype(int)
+
+                score_truth_i = data_dict[que_id]['scores_truth'][i]
+                feature_i = data_dict[que_id]['features'][i:i + 1]
+
+                kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
+                label_i = kmeans.predict(feature_i)
+
+                # connect labels to scores
+                scores = Y[kmeans.labels_ == label_i[0]]
+                # print('socres:', scores)
+                # print('label_i', label)
+                count = len(scores)
+                score = sum(scores) / count
+
+                # dict_score_label, dict_label_score = {}, {}
+                # for label in range(0, k):
+                #     scores = Y[kmeans.labels_==label]
+                #     count = len(scores)
+                #     dict_score_label[]
+                #     pass
+
+
+                # predict
+                # score = clf.predict(feature_i) / 2
+                error = score_truth_i - score
+                error_abs = abs(error)
+                error_round = round(error_abs)
+                question = data_dict[que_id]["question"]
+                ans_ref = data_dict[que_id]["ans_ref"]
+                ans_stu = data_dict[que_id]["ans_stu"][i]
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score, score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score, score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu), file=fr)
+
+def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale = 0):
     '''
     Run knn algorithm using all other answers under the same question as training data.
     :param fn: File name to save the results.
@@ -1167,11 +1461,16 @@ def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
             and returns an array of the same shape containing the weights.
     :return: None
     '''
-    #TODO: update the parameters
     feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
     data_dict = read_training_data(feature_path)
+    # fn = fn +  '.' + feature_type + '.' +  cur_time()
+    fn = '{}.{}.{}.{}.{}.{}.{}.{}'.format(feature_type, fn, n_neighbors, p,
+                                          'reliable' if reliable else 'unreliable', weight, training_scale, cur_time())
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
 
-    with open(fn, 'w') as fr:
+    with open(result_path + '/result.txt', 'w') as fr:
         for que_id in data_dict:
             for i in range(len(data_dict[que_id]['scores_truth'])):
                 # i refers an answer
@@ -1191,19 +1490,32 @@ def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight):
                 Y = (Y * 2).astype(int)
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
                 feature_i = data_dict[que_id]['features'][i:i + 1]
+                if n_neighbors > len(X):
+                    n_neighbors = len(X)
                 clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
                 clf.fit(X, Y)
 
                 # predict
                 score = clf.predict(feature_i) / 2
+                # try:
+                #     score = clf.predict(feature_i) / 2
+                # except :
+                #     print("error id:{}.{}".format(que_id, i+1))
+                #     print("error: k=", n_neighbors)
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
                 error_round = round(error_abs)
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round))
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round), file=fr)
-
+                question = data_dict[que_id]["question"]
+                ans_ref = data_dict[que_id]["ans_ref"]
+                ans_stu = data_dict[que_id]["ans_stu"][i]
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
+                                                                              error,
+                                                                              error_abs, error_round, question, ans_ref,
+                                                                              ans_stu), file=fr)
 
 def score_question_wise(fn, clf, feature_type, reliable=True):
     '''
@@ -1243,9 +1555,9 @@ def score_question_wise(fn, clf, feature_type, reliable=True):
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
                 error_round = round(error_abs)
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round))
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
 
 
@@ -1288,9 +1600,9 @@ def score(fn, clf, feature_type, reliable=True):
                 error = score_truth_i - score[0]
                 error_abs = abs(error)
                 error_round = round(error_abs)
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round))
-                print('score of {}.{}: {}: {}: {}: {}: {}'.format(que_id, i + 1, score[0], score_truth_i, error,
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
                                                                   error_abs, error_round), file=fr)
 
 
@@ -1320,14 +1632,17 @@ def count_error(fn):
     #         open('error_round.count.txt', 'w') as erc:
     result_path = RESULTS_PATH + '/results/' + fn
 
-    with open(result_path + '/result' , 'r') as fe, \
+    with open(result_path + '/result.txt' , 'r') as fe, \
             open(result_path + '/errors', 'w') as fo:
         svr_all = map(lambda line: line.split(':'), fe.readlines())
-        _, _, _, error, error_abs, error_round = zip(*svr_all)
+        _, score, truth, error, error_abs, error_round = zip(*svr_all)
         count = len(error)
+        score = map(float, score)
+        truth = map(float, truth)
         error = map(float, error)
         error_abs = map(float, error_abs)
         error_round = map(float, error_round)
+        rms = sqrt(mean_squared_error(list(score), list(truth)))
 
         def count_hist(error_hist, echo=False):
             k = list(np.arange(-4.5, 5.1, 0.5))
@@ -1351,6 +1666,7 @@ def count_error(fn):
         fo.writelines(errors)
         fo.write('{}\t{}\t{}\t{}\n'.format(count, sum(d_error.values()), sum(d_error_abs.values()),
                                            sum(d_error_round.values())))
+        fo.write('RMSE:' + str(rms) + '\n')
 
 def remove_scores():
     cur_path = sys.path[0]
@@ -1371,19 +1687,10 @@ if __name__ == '__main__':
     # run_procerpron_learning()
     # run_gen_features()
     # remove_scores()
-    for scale in range(100, 2100, 100):
-        print('scale:', scale)
-        run_svr(fn='svr', feature_type='gb', reliable=False, training_scale=scale)
-    # run_svr_question_wise(fn='svr.all', feature_type='gb', reliable=True)
-    # for k in range(400, 2100, 100):
-    #     run_knn(fn='knn', feature_type='gb', reliable=False, n_neighbors=10, weight='uniform', p=2, training_scale=0)
-    # run_knn_question_wise(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='uniform')
-    # score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=5, weight='uniform')
-    # count_error('./knn.all')
-    # count_error('gb.knn.10.unreliable.uniform.0.20171027114216')
-    # count_error('result/gb.knn.distance.reliable.q_wise.171004/result')
-    # count_error('result/gb.knn.uniform.reliable.171004/result')
-    # count_error('result/gb.knn.uniform.reliable.q_wise.171004/result')
-    # count_error('result/gb.svr.reliable.171004/result')
-    # count_error('result/gb.svr.reliable.q_wise.171004/result')
-    # count_error('result/gb.svr.unreliable.171004/result')
+    # generate_features_bow(grams=[1,2])
+
+    run_svr_question_wise("svr_qwise", 'bow_1-2gram', True, 0)
+    # for k in [5,10,20, 30]:
+    #     run_knn_question_wise("knn_qwise", feature_type="bow_1-2gram", reliable=False, n_neighbors=k, weight="uniform")
+    #     run_knn_question_wise("knn_qwise", feature_type="bow_1-2gram", reliable=False, n_neighbors=k, weight="distance")
+    # run_kmeans_question_wise("kmeans_qwise", feature_type="bow_2gram", k=5, reliable=False)
