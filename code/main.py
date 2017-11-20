@@ -21,20 +21,24 @@ from nltk.stem.porter import PorterStemmer
 
 from sklearn.svm import SVR
 
+import progressbar
+
 LEVENSHTEIN = 3
 
 # Paths
 SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
+# DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-answers"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
-RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
+DATA_PATH = SCRIPT_PATH + "/../data/kaggle_train"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_uq"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ua"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
+RESULTS_PATH = SCRIPT_PATH + "/../results_kaggle_train"
 
 RAW_PATH = DATA_PATH + "/raw"
 RAW_PATH_STU = DATA_PATH + "/raw/ans_stu"
@@ -743,11 +747,12 @@ def get_tokens(text, gram=1):
     no_punctuation = lower.translate(remove_punctuation_map)
     tokens = nltk.word_tokenize(no_punctuation)
     return nltk.ngrams(tokens, gram)
+
 def read_tokens_answer(answer, gram=1):
     # Answers are starts with answer id
     # Remove answer id first before extract tokens
     answer = answer[answer.find(' ') + 1:]
-    return set(get_tokens(answer, gram=gram))
+    return sorted(get_tokens(answer, gram=gram))
 
 def read_tokens_answers(que_id, gram=1, ref = True):
     '''
@@ -774,30 +779,40 @@ def read_tokens_answers(que_id, gram=1, ref = True):
         except:
             print("error:", answer)
     assert token_set
-    return token_set
+    return sorted(list(token_set))
 
-def generate_features_bow(grams = [1,], ref = True):
+def generate_features_bow(grams = [1,], ref = False):
 
-    for que_id in os.listdir(RAW_PATH_STU):
-        print(que_id)
+    for que_id in sorted(os.listdir(RAW_PATH_STU)):
+        print("\n"+que_id)
 
         # generate bow features
         feature_path = RESULTS_PATH+"/features_bow_{}gram/".format("-".join(map(str, grams)))
         if not os.path.exists(feature_path):
             os.makedirs(feature_path)
 
+        tokens_que = {}
+        for gram in grams:
+            tokens_que[gram] = tuple(read_tokens_answers(que_id, gram=gram, ref=ref))
+
         with open(feature_path +"/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea,\
             open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
-            for answer in f_ans.readlines():
+            f_ans_lines = f_ans.readlines()
+            bar = progressbar.ProgressBar(max_value=len(f_ans_lines))
+            bar_i = 0
+            for answer in f_ans_lines:
                 features = []
                 for gram in grams:
-                    tokens_all = tuple(read_tokens_answers(que_id, gram=gram, ref=ref))
-                    tokens_answer = read_tokens_answer(answer, gram=gram)
-                    bow = [1] * len(tokens_all)
-                    for i in range(len(tokens_all)):
-                        bow[i] = 1 if tokens_all[i] in tokens_answer else 0
+                    # tokens_all = tuple(read_tokens_answers(que_id, gram=gram, ref=ref))
+                    tokens_answer = set(read_tokens_answer(answer, gram=gram))
+                    bow = [1] * len(tokens_que[gram])
+                    for i in range(len(tokens_que[gram])):
+                        bow[i] = 1 if tokens_que[gram][i] in tokens_answer else 0
                     features.extend(bow)
+
                 print(*features, file=f_fea, sep=',')
+                bar.update(bar_i)
+                bar_i += 1
                 # print(bow)
 
 def generate_feature_g(ans_stu, ans_ins, que, w_phi, cache, ic):
@@ -1042,6 +1057,7 @@ def read_training_data(feature_path):
             features = list(map(lambda s: s.split(','), ff.readlines()))
             features = np.array(list(map(lambda l: list(map(np.float64, l)), features)))
             raw_r, raw_q, raw_s = '', '', []
+
             for s in f_raw_q.readlines():
                 if s.startswith(que_id):
                     raw_q = s
@@ -1153,9 +1169,8 @@ def run_svr_question_wise(fn, feature_type, reliable, training_scale = 0):
 
                 scores_truth = data_dict[que_id]['scores_truth'][array_filter]
                 features = data_dict[que_id]['features'][array_filter]
-
-                X = features
-                Y = scores_truth
+                X = features[:training_scale] if training_scale > 0 else features
+                Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
                 feature_i = data_dict[que_id]['features'][i:i + 1]
                 clf = SVR()
@@ -1177,6 +1192,7 @@ def run_svr_question_wise(fn, feature_type, reliable, training_scale = 0):
                                                                               error,
                                                                               error_abs, error_round, question, ans_ref,
                                                                               ans_stu), file=fr)
+
 
 def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale = 0):
     '''
@@ -1400,8 +1416,8 @@ def run_kmeans_question_wise(fn, feature_type, reliable, k, training_scale = 0):
                 scores_truth = data_dict[que_id]['scores_truth'][array_filter]
                 features = data_dict[que_id]['features'][array_filter]
 
-                X = features
-                Y = scores_truth
+                X = features[:training_scale] if training_scale > 0 else features
+                Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
                 # Y = (Y * 2).astype(int)
 
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
@@ -1485,8 +1501,8 @@ def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight, p=2, 
                 scores_truth = data_dict[que_id]['scores_truth'][array_filter]
                 features = data_dict[que_id]['features'][array_filter]
 
-                X = features
-                Y = scores_truth
+                X = features[:training_scale] if training_scale > 0 else features
+                Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
                 Y = (Y * 2).astype(int)
                 score_truth_i = data_dict[que_id]['scores_truth'][i]
                 feature_i = data_dict[que_id]['features'][i:i + 1]
@@ -1687,10 +1703,33 @@ if __name__ == '__main__':
     # run_procerpron_learning()
     # run_gen_features()
     # remove_scores()
-    # generate_features_bow(grams=[1,2])
 
-    run_svr_question_wise("svr_qwise", 'bow_1-2gram', True, 0)
-    # for k in [5,10,20, 30]:
+    # print("\ngenerating feature: bow_1-2gram")
+    # generate_features_bow(grams=[1,2])
+    # print("\ngenerating feature: bow_1gram")
+    # generate_features_bow(grams=[1])
+    # print("\ngenerating feature: bow_2gram")
+    # generate_features_bow(grams=[2])
+
+    print("runing svr...")
+    run_svr_question_wise("svr_qwise", 'bow_1gram', True, 300)
+    # for k in range(100, 1000, 200):
+    #     print("runing knn with k of ",k)
+    #     run_knn_question_wise("knn_qwise", feature_type="bow_1gram", reliable=False, n_neighbors=k, weight="uniform")
+    #     run_knn_question_wise("knn_qwise", feature_type="bow_1gram", reliable=False, n_neighbors=k, weight="distance")
+
+    # print("runing svr...")
+    # run_svr_question_wise("svr_qwise", 'bow_1-2gram', True, 300)
+    # for k in range(100, 1000, 200):
+    #     print("runing knn with k of ", k)
     #     run_knn_question_wise("knn_qwise", feature_type="bow_1-2gram", reliable=False, n_neighbors=k, weight="uniform")
     #     run_knn_question_wise("knn_qwise", feature_type="bow_1-2gram", reliable=False, n_neighbors=k, weight="distance")
-    # run_kmeans_question_wise("kmeans_qwise", feature_type="bow_2gram", k=5, reliable=False)
+
+    # print("runing svr...")
+    # run_svr_question_wise("svr_qwise", 'bow_2gram', True, 300)
+    # for k in range(100, 1000, 200):
+    #     print("runing knn with k of ", k)
+    #     run_knn_question_wise("knn_qwise", feature_type="bow_2gram", reliable=False, n_neighbors=k, weight="uniform")
+    #     run_knn_question_wise("knn_qwise", feature_type="bow_2gram", reliable=False, n_neighbors=k, weight="distance")
+
+
