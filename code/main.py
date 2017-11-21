@@ -28,17 +28,18 @@ LEVENSHTEIN = 3
 # Paths
 SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
 # DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
-# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
+DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
+# DATA_PATH = SCRIPT_PATH + "/../data/kaggle_train"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-answers"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
-DATA_PATH = SCRIPT_PATH + "/../data/kaggle_train"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
+RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_kaggle_train"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_uq"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ua"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
-RESULTS_PATH = SCRIPT_PATH + "/../results_kaggle_train"
+
 
 RAW_PATH = DATA_PATH + "/raw"
 RAW_PATH_STU = DATA_PATH + "/raw/ans_stu"
@@ -741,26 +742,32 @@ def tf_idf_weight_answer_v(ans_stu, ans_ins, answer_demoting=False):
     tfidf_values = tfidf.transform([answer_pair])
     return [tfidf[0, col] for col in tfidf_values.nonzero()[1]]
 
-def get_tokens(text, gram=1):
+def get_tokens(text, gram_n, char_gram):
     lower = text.lower()
     remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
     no_punctuation = lower.translate(remove_punctuation_map)
-    tokens = nltk.word_tokenize(no_punctuation)
-    return nltk.ngrams(tokens, gram)
+    tokens = list(no_punctuation) if char_gram else nltk.word_tokenize(no_punctuation)
+    return nltk.ngrams(tokens, gram_n)
 
-def read_tokens_answer(answer, gram=1):
+def read_tokens_answer(answer, gram_n, char_gram):
     # Answers are starts with answer id
     # Remove answer id first before extract tokens
     answer = answer[answer.find(' ') + 1:]
-    return sorted(get_tokens(answer, gram=gram))
+    return sorted(get_tokens(answer, gram_n=gram_n, char_gram = char_gram))
 
-def read_tokens_answers(que_id, gram=1, ref = True):
+def read_tokens_answers(que_id, gram_n, ref, char_gram):
     '''
-    Read answers under one question and return a tuple of tokens.
-    The length of tuple of tokens is used as the length of BOW.
-    :param fn_question:
-    question id, it should be same to the file name.
+    Read all the tokens of answers under a question with id of que_id. Tokens consist of n-gram tuples.
+    :param que_id:
+        question id
+    :param gram_n:
+        number of grams
+    :param ref:
+        If ref is True, reference answer is needed and will be read in.
+    :param char_gram:
+        If char_gram is True, character n-gram will be applied.
     :return:
+        An sorted list of token set.
     '''
     token_set = set()
     if ref:
@@ -768,32 +775,50 @@ def read_tokens_answers(que_id, gram=1, ref = True):
         with open(RAW_PATH + "/answers", errors="ignore") as f_ref:
             for answer in f_ref.readlines():
                 if answer.startswith(que_id):
-                    token_set = token_set.union(read_tokens_answer(answer, gram=gram))
+                    token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram= char_gram))
                     break
 
     # read student answers
     with open(RAW_PATH_STU + "/" + que_id, "r", errors="ignore") as f_ans_raw:
         try:
             for answer in f_ans_raw.readlines():
-                token_set = token_set.union(read_tokens_answer(answer))
+                token_set = token_set.union(read_tokens_answer(answer, gram_n = gram_n, char_gram = char_gram))
         except:
             print("error:", answer)
     assert token_set
     return sorted(list(token_set))
 
-def generate_features_bow(grams = [1,], ref = False):
+def generate_features_bow(grams_n_list, ref, char_gram):
+    '''
+    generate n-gram features for BOW
+    :param grams_n_list:
+        A list of number as n-gram. If the length of list is greater than 1, then the feature will be
+        extended with all the n-gram features like [ ... 1-gram ..., ... 2-gram ..., ..., ... n-gram ...]
+    :param ref:
+        When ref is True, reference answer will be read as one of the training data. Leave it as False when
+        there's no reference answer.
+    :param char_gram:
+        Character n-gram features will be generated when char_gram is True
+    :return:
+        None. The featrues will be written to files named with n-gram
+    '''
 
     for que_id in sorted(os.listdir(RAW_PATH_STU)):
         print("\n"+que_id)
 
         # generate bow features
-        feature_path = RESULTS_PATH+"/features_bow_{}gram/".format("-".join(map(str, grams)))
+        if char_gram:
+            feature_path = RESULTS_PATH + "/features_bow_{}gram_char/".format("-".join(map(str, grams_n_list)))
+        else:
+            feature_path = RESULTS_PATH+"/features_bow_{}gram/".format("-".join(map(str, grams_n_list)))
         if not os.path.exists(feature_path):
             os.makedirs(feature_path)
 
         tokens_que = {}
-        for gram in grams:
-            tokens_que[gram] = tuple(read_tokens_answers(que_id, gram=gram, ref=ref))
+
+        # Read n-gram set from answers of question with id of que_id.
+        for gram in grams_n_list:
+            tokens_que[gram] = tuple(read_tokens_answers(que_id, gram_n=gram, ref=ref, char_gram= char_gram))
 
         with open(feature_path +"/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea,\
             open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
@@ -802,9 +827,10 @@ def generate_features_bow(grams = [1,], ref = False):
             bar_i = 0
             for answer in f_ans_lines:
                 features = []
-                for gram in grams:
+                for gram in grams_n_list:
                     # tokens_all = tuple(read_tokens_answers(que_id, gram=gram, ref=ref))
-                    tokens_answer = set(read_tokens_answer(answer, gram=gram))
+                    # Read n-gram sef from an answer and generate bow feature based on tokens_que for it.
+                    tokens_answer = set(read_tokens_answer(answer, gram_n=gram, char_gram=char_gram))
                     bow = [1] * len(tokens_que[gram])
                     for i in range(len(tokens_que[gram])):
                         bow[i] = 1 if tokens_que[gram][i] in tokens_answer else 0
@@ -997,7 +1023,6 @@ def generate_features(que_id, w_phi, cache, ic, feature_type, fn_ans_ins='answer
                 feature = generate_feature(ans_stu, ans_ins, que, w_phi, cache, ic)
 
             print(','.join(map(str, feature)), file=f)
-
 
 def run_procerpron_learning():
     ic = wic.ic('ic-bnc.dat')
@@ -1705,31 +1730,38 @@ if __name__ == '__main__':
     # remove_scores()
 
     # print("\ngenerating feature: bow_1-2gram")
-    # generate_features_bow(grams=[1,2])
+    # generate_features_bow(grams=[5])
     # print("\ngenerating feature: bow_1gram")
-    # generate_features_bow(grams=[1])
+    # generate_features_bow(grams_n_list=[1], ref=True, char_gram=False)
+    # generate_features_bow(grams_n_list=[4], ref=True, char_gram=True)
+    # generate_features_bow(grams_n_list=[5], ref=True, char_gram=True)
     # print("\ngenerating feature: bow_2gram")
     # generate_features_bow(grams=[2])
 
     print("runing svr...")
-    run_svr_question_wise("svr_qwise", 'bow_1gram', True, 300)
-    # for k in range(100, 1000, 200):
-    #     print("runing knn with k of ",k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_1gram", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_1gram", reliable=False, n_neighbors=k, weight="distance")
+    run_svr_question_wise("svr_qwise", 'bow_2gram_char', True, 0)
+    for k in [5, 10, 20, 30]:
+        print("runing knn with k of ",k)
+        run_knn_question_wise("knn_qwise", feature_type="bow_2gram_char", reliable=False, n_neighbors=k, weight="uniform")
+        run_knn_question_wise("knn_qwise", feature_type="bow_2gram_char", reliable=False, n_neighbors=k, weight="distance")
 
-    # print("runing svr...")
-    # run_svr_question_wise("svr_qwise", 'bow_1-2gram', True, 300)
-    # for k in range(100, 1000, 200):
-    #     print("runing knn with k of ", k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_1-2gram", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_1-2gram", reliable=False, n_neighbors=k, weight="distance")
+    print("runing svr...")
+    run_svr_question_wise("svr_qwise", 'bow_3gram_char', True, 0)
+    for k in [5, 10, 20, 30]:
+        print("runing knn with k of ",k)
+        run_knn_question_wise("knn_qwise", feature_type="bow_3gram_char", reliable=False, n_neighbors=k, weight="uniform")
+        run_knn_question_wise("knn_qwise", feature_type="bow_3gram_char", reliable=False, n_neighbors=k, weight="distance")
 
-    # print("runing svr...")
-    # run_svr_question_wise("svr_qwise", 'bow_2gram', True, 300)
-    # for k in range(100, 1000, 200):
-    #     print("runing knn with k of ", k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_2gram", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_2gram", reliable=False, n_neighbors=k, weight="distance")
+    print("runing svr...")
+    run_svr_question_wise("svr_qwise", 'bow_4gram_char', True, 0)
+    for k in [5, 10, 20, 30]:
+        print("runing knn with k of ",k)
+        run_knn_question_wise("knn_qwise", feature_type="bow_4gram_char", reliable=False, n_neighbors=k, weight="uniform")
+        run_knn_question_wise("knn_qwise", feature_type="bow_4gram_char", reliable=False, n_neighbors=k, weight="distance")
 
-
+    print("runing svr...")
+    run_svr_question_wise("svr_qwise", 'bow_5gram_char', True, 0)
+    for k in [5, 10, 20, 30]:
+        print("runing knn with k of ",k)
+        run_knn_question_wise("knn_qwise", feature_type="bow_5gram_char", reliable=False, n_neighbors=k, weight="uniform")
+        run_knn_question_wise("knn_qwise", feature_type="bow_5gram_char", reliable=False, n_neighbors=k, weight="distance")
