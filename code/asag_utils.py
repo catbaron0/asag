@@ -2,11 +2,17 @@ from nltk.corpus import wordnet as wn
 from nltk.corpus import wordnet_ic as wic
 from sklearn.metrics import mean_squared_error
 from sklearn.cluster import KMeans
+from functools import reduce
+import collections
 
 from math import sqrt
 import re
+import math
 import sys
 import numpy as np
+
+np.set_printoptions(threshold=np.nan)
+
 from munkres import Munkres
 from nltk.metrics import *
 # from sklearn.feature_extraction.text import TfidfVectorizer
@@ -20,26 +26,31 @@ from sklearn import neighbors
 from nltk.stem.porter import PorterStemmer
 
 from sklearn.svm import SVR
-
+from gensim.models import Word2Vec
 import progressbar
+
+from nltk.corpus import brown
+from scipy import spatial
+from autograd import grad
+import spacy
+from spacy.lang.en import LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES
 
 LEVENSHTEIN = 3
 
 # Paths
 SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
-# DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
+DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
 # DATA_PATH = SCRIPT_PATH + "/../data/kaggle_train"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-answers"
-DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
+# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
+RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_kaggle_train"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_uq"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ua"
-RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
-
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
 
 RAW_PATH = DATA_PATH + "/raw"
 RAW_PATH_STU = DATA_PATH + "/raw/ans_stu"
@@ -163,6 +174,10 @@ def cur_time():
     return time.strftime('%Y%m%d%H%M%S', time.localtime(time.time()))
 
 
+def sigmoid(x):
+    return 1 / (1 + math.exp(-x))
+
+
 def overlap(syn1, syn2):
     def1 = set([word for word in re.split(r'[^a-zA-Z]', syn1.definition()) if word])
     def2 = set([word for word in re.split(r'[^a-zA-Z]', syn2.definition()) if word])
@@ -209,39 +224,6 @@ def similarity_nodes(func, node_stu, node_ins, cache, ic=None):
         sim = max(sims)
     cache[c_key] = sim
     return sim
-
-
-# def similarity_between_nodes(fun, node_stu, ans_stu, node_ins, ans_ins, ic=None):
-#     """
-#     Calculate one similarity between two nodes (not subgraph) and save it to instructor answer to avoid
-#     repeat calculation.
-#     fun: Similarity function from wordnet
-#     node_stu, node_ins: Nodes of dependence graph of answers from student and instructor
-#     ans_stu, ans_ins: Sentence objects of answers from student and instructor
-#     """
-#     if ans_stu not in ans_ins.similarity:
-#         ans_ins.similarity[ans_stu] = {}
-#
-#     if fun.__name__ in ans_ins.similarity[ans_stu]:
-#         return ans_ins.similarity[ans_stu][fun.__name__]
-#
-#     word_stu, word_ins = node_ins.split(":")[0], node_stu.split(":")[0]
-#     if fun.__name__ == 'lch_similarity':
-#         sims = [fun(s1, s2) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word_stu) for s2 in
-#                 wn.synsets(word_ins)]
-#     elif fun.__name__ in {'res_similarity', 'lin_similarity', 'jcn_similarity'}:
-#         sims = [fun(s1, s2, ic) if s1.pos() == s2.pos() else 0 for s1 in wn.synsets(word_stu) for s2 in
-#                 wn.synsets(word_ins)]
-#     else:
-#         sims = [fun(s1, s2) for s1 in wn.synsets(word_stu) for s2 in wn.synsets(word_ins)]
-#     sims = list(filter(lambda x: x, sims))
-#     if not sims:
-#         # print('WARNING: The similarity of "{0}" between [{1}] and [{2}] is 0!'.format(fun.__name__, word1, word2))
-#         sim = 0
-#         pass
-#     else:
-#         sim = max(sims)
-#     return sim
 
 
 def similarity_subgraph(func, nodes_stu, nodes_ins, cache, ic=None):
@@ -742,11 +724,13 @@ def tf_idf_weight_answer_v(ans_stu, ans_ins, answer_demoting=False):
     tfidf_values = tfidf.transform([answer_pair])
     return [tfidf[0, col] for col in tfidf_values.nonzero()[1]]
 
+
 def stem_tokens(tokens, stemmer):
     stemmed = set()
     for item in tokens:
         stemmed.add(stemmer.stem(item))
     return stemmed
+
 
 def get_tokens(text, gram_n, char_gram, stemmer):
     lower = text.lower()
@@ -755,11 +739,21 @@ def get_tokens(text, gram_n, char_gram, stemmer):
     tokens = list(no_punctuation) if char_gram else nltk.word_tokenize(no_punctuation)
     return nltk.ngrams(stem_tokens(tokens, stemmer), gram_n)
 
+
+def read_voc(text, stemmer):
+    lower = text.lower()
+    remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
+    no_punctuation = lower.translate(remove_punctuation_map)
+    tokens = nltk.word_tokenize(no_punctuation)
+    return tokens
+
+
 def read_tokens_answer(answer, gram_n, char_gram, stemmer):
     # Answers are starts with answer id
     # Remove answer id first before extract tokens
     answer = answer[answer.find(' ') + 1:]
-    return sorted(get_tokens(answer, gram_n=gram_n, char_gram = char_gram, stemmer=stemmer))
+    return sorted(get_tokens(answer, gram_n=gram_n, char_gram=char_gram, stemmer=stemmer))
+
 
 def read_tokens_answers(que_id, gram_n, ref, char_gram):
     '''
@@ -782,7 +776,7 @@ def read_tokens_answers(que_id, gram_n, ref, char_gram):
         with open(RAW_PATH + "/answers", errors="ignore") as f_ref:
             for answer in f_ref.readlines():
                 if answer.startswith(que_id):
-                    token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram= char_gram,
+                    token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram=char_gram,
                                                                    stemmer=stemmer))
                     break
 
@@ -790,12 +784,13 @@ def read_tokens_answers(que_id, gram_n, ref, char_gram):
     with open(RAW_PATH_STU + "/" + que_id, "r", errors="ignore") as f_ans_raw:
         try:
             for answer in f_ans_raw.readlines():
-                token_set = token_set.union(read_tokens_answer(answer, gram_n = gram_n, char_gram = char_gram,
+                token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram=char_gram,
                                                                stemmer=stemmer))
         except:
             print("error:", answer)
     assert token_set
     return sorted(list(token_set))
+
 
 def generate_features_bow(grams_n_list, ref, char_gram):
     '''
@@ -813,13 +808,13 @@ def generate_features_bow(grams_n_list, ref, char_gram):
     '''
     stemmer = PorterStemmer()
     for que_id in sorted(os.listdir(RAW_PATH_STU)):
-        print("\n"+que_id)
+        print("\n" + que_id)
 
         # generate bow features
         if char_gram:
             feature_path = RESULTS_PATH + "/features_bow_{}gram_char/".format("-".join(map(str, grams_n_list)))
         else:
-            feature_path = RESULTS_PATH+"/features_bow_{}gram/".format("-".join(map(str, grams_n_list)))
+            feature_path = RESULTS_PATH + "/features_bow_{}gram/".format("-".join(map(str, grams_n_list)))
         if not os.path.exists(feature_path):
             os.makedirs(feature_path)
 
@@ -829,11 +824,11 @@ def generate_features_bow(grams_n_list, ref, char_gram):
         with open(feature_path + "/bow_{}".format(que_id), "wt", encoding='utf-8',
                   errors="ignore") as f_bow:
             for gram in grams_n_list:
-                tokens_que[gram] = tuple(read_tokens_answers(que_id, gram_n=gram, ref=ref, char_gram= char_gram))
-                f_bow.write("\t".join(map(','.join,tokens_que[gram]))+"\t")
+                tokens_que[gram] = tuple(read_tokens_answers(que_id, gram_n=gram, ref=ref, char_gram=char_gram))
+                f_bow.write("\t".join(map(','.join, tokens_que[gram])) + "\t")
 
-        with open(feature_path +"/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea,\
-            open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
+        with open(feature_path + "/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea, \
+                open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
             f_ans_lines = f_ans.readlines()
             bar = progressbar.ProgressBar(max_value=len(f_ans_lines))
             bar_i = 0
@@ -852,6 +847,7 @@ def generate_features_bow(grams_n_list, ref, char_gram):
                 bar.update(bar_i)
                 bar_i += 1
                 # print(bow)
+
 
 def generate_feature_g(ans_stu, ans_ins, que, w_phi, cache, ic):
     """
@@ -1036,6 +1032,7 @@ def generate_features(que_id, w_phi, cache, ic, feature_type, fn_ans_ins='answer
 
             print(','.join(map(str, feature)), file=f)
 
+
 def run_procerpron_learning():
     ic = wic.ic('ic-bnc.dat')
     similarity_cache = {}
@@ -1047,8 +1044,8 @@ def run_procerpron_learning():
             print(','.join(map(str, w)), file=f)
 
 
-def run_gen_features(qids='all', fn_w='w', feature_type = 'gb'):
-    fw = RESULTS_PATH+'/' + fn_w
+def run_gen_features(qids='all', fn_w='w', feature_type='gb'):
+    fw = RESULTS_PATH + '/' + fn_w
     with open(fw, 'r') as f:
         w_string = f.readline()
         print('w: ', w_string)
@@ -1064,745 +1061,462 @@ def run_gen_features(qids='all', fn_w='w', feature_type = 'gb'):
         generate_features(qid, w_phi, similarity_cache, ic, feature_type)
 
 
-def read_training_data(feature_path):
-    '''
-    Read features and labels for training. This function will read all the features
-    and scores of each answer for each question.
-    :param feature_path: path/of/feature/files/.
-    :return: A dict with structure as below
-    # data_dic = {
-    #   '1.1':{
-    #       'truth': array(n*1)
-    #       'features': array(n*30)
-    #       'diff': array(n*30)
-    #   }
-    # }
-    '''
-    scores_truth_path = DATA_PATH + '/scores/'
-    que_ids = os.listdir(feature_path)
-    data_dict = {}
-    for que_id in que_ids:
-        data_dict[que_id] = {}
-        with open(feature_path + que_id, 'r') as ff, \
-                open(scores_truth_path + que_id + '/ave') as fs, \
-                open(RAW_PATH + "/answers", "r", errors="ignore") as f_raw_r, \
-                open(RAW_PATH + "/questions", "r", errors="ignore") as f_raw_q, \
-                open(RAW_PATH_STU + "/" + que_id, "r", errors="ignore") as f_raw_s, \
-                open(scores_truth_path + que_id + '/diff') as fd:
+def read_training_data(feature_path, raw_path=RAW_PATH, score_path=DATA_PATH + '/scores/', include_ref=False):
+    id_que = os.listdir(feature_path)
+    record = list()
+    for i in id_que:
+        with open(feature_path + '/' + i, 'r') as ff, \
+                open(score_path + '/' + i + '/ave') as fs, \
+                open(raw_path + "/answers", "r", errors="ignore") as f_raw_r, \
+                open(raw_path + "/questions", "r", errors="ignore") as f_raw_q, \
+                open(raw_path + "/ans_stu/" + i, "r", errors="ignore") as f_raw_s, \
+                open(score_path + "/" + i + '/diff') as fd:
             scores_truth = np.array(list(map(np.float64, fs.readlines())))
             diff = np.array(list(map(np.float64, fd.readlines())))
             features = list(map(lambda s: s.split(','), ff.readlines()))
-            features = np.array(list(map(lambda l: list(map(np.float64, l)), features)))
+            features = (list(map(lambda l: np.array(list(map(np.float64, l))), features)))
             raw_r, raw_q, raw_s = '', '', []
 
             for s in f_raw_q.readlines():
-                if s.startswith(que_id):
+                if s.startswith(i):
                     raw_q = s
                     break
 
             for s in f_raw_r.readlines():
-                if s.startswith(que_id):
+                if s.startswith(i):
                     raw_r = s
                     break
 
-            raw_s = np.array(list(map(lambda s:s.strip(), f_raw_s.readlines())))
+            id_q = [i] * len(features)
+            id_s = list(range(1, len(features) + 1))
 
-            data_dict[que_id]['scores_truth'] = scores_truth
-            data_dict[que_id]['features'] = features
-            data_dict[que_id]['diff'] = diff
-            data_dict[que_id]['question'] = raw_q.strip()
-            data_dict[que_id]['ans_ref'] = raw_r.strip()
-            data_dict[que_id]['ans_stu'] = raw_s
-    return data_dict
+            raw_stu = np.array(list(map(lambda s: s.strip(), f_raw_s.readlines())))
+            raw_que = [raw_q] * len(features)
+            raw_ref = [raw_r] * len(features)
 
-def run_svr(fn, feature_type, reliable, training_scale = 0):
-    # When `reliable` is True, answers whose score is with diff over 2 will be removed
-    # from training data
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
-    fn = '{}.{}.{}.{}.{}'.format(feature_type, fn, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
+            recode_i = list(zip(id_q, raw_que, id_s, raw_stu, raw_ref, features, scores_truth, diff))
+            record.extend(recode_i)
+    TrainingData = collections.namedtuple('TrainingData', 'id id_que que id_ans ans ref feature score diff')
+    ret = TrainingData(list(range(len(record))), *list(map(np.array, zip(*record))))
+    # print(ret.id, ret.id_que, ret.stu)
+    return ret
+
+
+def score_answer(fn_prefix, reliable, feature, model, model_params, qwise, training_scale):
+    fn_params = ['{}_{}'.format(k, v) for k, v in model_params.items()]
+    fn = '{}.{}.{}.{}.{}.{}'.format(fn_prefix, feature, 'reliable' if reliable else 'unreliable',
+                                    'qwise' if reliable else 'unqwise', ".".join(fn_params), cur_time())
+
     result_path = RESULTS_PATH + '/results/' + fn
     if not os.path.exists(result_path):
         os.mkdir(result_path)
 
+    # Initialize the model
+    if 'knnc' == model:
+        runner = neighbors.KNeighborsClassifier(**model_params)
+    elif 'knnr' == model:
+        runner = neighbors.KNeighborsRegressor(**model_params)
+    elif 'svr' == model:
+        runner = SVR(**model_params)
+    elif 'cos' == model:
+        runner = CosineKNN(**model_params)
+
+    # Read training data
+    training_data = read_training_data(RESULTS_PATH + "/features_" + feature)
+
+    n_data = len(training_data.id)
     with open(result_path + '/result.txt', 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers the answer to be scored
-                # Train svr for each answer with all other answers
-                scale = 0
-                features_all = []
-                scores_all = []
-                for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
-                        [True] * len(data_dict[qid]['diff']))
-                    if qid != que_id:
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                    else:
-                        array_filter[i] = False
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                        # scores_truth = np.delete(data_dict[qid]['scores_truth'], i, 0)
-                        # features = np.delete(data_dict[qid]['features'], i, 0)
-                    features_all.append(np.array(features))
-                    scores_all.append(np.array(scores_truth))
-                    scale += len(features)
-                    if scale >= training_scale > 0:
-                        # print('scale: ', scale)
-                        break
-                X = np.concatenate(features_all)
-                Y = np.concatenate(scores_all)
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
+        for i in training_data.id:
+            filter = list()
+            if qwise:
+                filter_qwise = np.array(training_data.id_que) == training_data.id_que[i]
+                filter.append(filter_qwise)
+            if reliable:
+                filter.append(np.array(training_data.diff) < 3)
+            filter_rm = [True] * n_data
+            filter_rm[i] = False
+            filter.append(filter_rm)
 
-                clf = SVR()
-                clf.fit(X, Y)
+            filter = np.array(list(map(lambda f: reduce(lambda x, y: x and y, f), zip(*filter))))
 
-                # predict
-                score = clf.predict(feature_i)
-                error = score_truth_i - score[0]
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                question = data_dict[que_id]["question"]
-                ans_ref = data_dict[que_id]["ans_ref"]
-                ans_stu = data_dict[que_id]["ans_stu"][i]
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu), file=fr)
+            scores_truth = training_data.score[filter]
+            features = training_data.feature[filter]
+            no_of_answers = training_data.id_ans[filter]
+            id_ques = training_data.id_que[filter]
 
-def run_svr_question_wise(fn, feature_type, reliable, fn_bow=None, training_scale = 0, kernel='rbf'):
-    '''
-    Train SVR model for each answer with all the other answers under the same question.
-    When `reliable` is True, answers whose score is with diff over 2 will be removed
-    from training data
-    '''
+            X = features[:training_scale] if training_scale > 0 else features
+            X = np.vstack(X)
+            Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
+            Y = (Y * 2).astype(int)
+            score_truth_i = training_data.score[i]
+            feature_i = training_data.feature[i]
+            # training
+            runner.fit(X, Y)
+            # predict
+            score = runner.predict(np.array([feature_i])) / 2
 
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    if fn_bow:
-        bow_path = RESULTS_PATH + '/' + fn_bow
-        assert os.path.exists(bow_path)
-    data_dict = read_training_data(feature_path)
-    fn = '{}.{}.{}.{}.{}'.format(feature_type, fn, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
-    result_path = RESULTS_PATH + '/results/' + fn
-    if not os.path.exists(result_path):
-        os.mkdir(result_path)
+            error = score_truth_i - score[0]
+            error_abs = abs(error)
+            error_round = round(error_abs)
+            question = training_data.que[i].strip()
+            ans_ref = training_data.ref[i].strip()
+            ans_stu = training_data.ans[i].strip()
+            que_id = training_data.id_que[i]
+            ans_id = training_data.id_ans[i]
 
-    with open(result_path + '/result.txt', 'w') as fr, open(result_path + '/weights.txt', 'w') as fw:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an answer
-                # Train svr for each answer with all other answers under the same question
-
-                # remove unreliable training data
-                scale = 0
-
-                array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
-                    [True] * len(data_dict[que_id]['diff']))
-                # remove current answer (to be predicted)
-                array_filter[i] = False
-
-                scores_truth = data_dict[que_id]['scores_truth'][array_filter]
-                features = data_dict[que_id]['features'][array_filter]
-                X = features[:training_scale] if training_scale > 0 else features
-                Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-                clf = SVR(kernel=kernel)
-                clf.fit(X, Y)
-                if kernel == 'linear' and fn_bow:
-                    weights = (clf.coef_)
-                    with open(bow_path + '/bow_' + que_id, 'r') as f_bow:
-                        bow = f_bow.readline().strip().split('\t')
-                    word_weight = sorted(zip(bow, weights[0]), key = lambda x:x[1], reverse=True)
-                    # print(word_weight)
-                    print('{}.{}\t{}'.format(que_id, i+1, word_weight), file=fw)
-                # predict
-                score = clf.predict(feature_i)
-                error = score_truth_i - score[0]
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                question = data_dict[que_id]["question"]
-                ans_ref = data_dict[que_id]["ans_ref"]
-                ans_stu = data_dict[que_id]["ans_stu"][i]
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu), file=fr)
-
-
-def run_knn(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale = 0):
-    '''
-    Run knn algorithm using all other answers as training data.
-    :param fn: File name to save the results.
-    :param feature_type: For now it may be one of 'g', 'b' or 'gb'.
-    :param reliable:
-        When `reliable` is True, answers whose score is with diff over 2 will
-        be removed from training data
-    :param n_neighbors: Parameter for KNN. The number neighbors.
-    :param weight:
-        Weight function used in prediction. Possible values:
-        ‘uniform’ : uniform weights. All points in each neighborhood are weighted equally.
-        ‘distance’ : weight points by the inverse of their distance. in this case,
-            closer neighbors of a query point will have a greater influence than neighbors
-            which are further away.
-        [callable] : a user-defined function which accepts an array of distances,
-            and returns an array of the same shape containing the weights.
-    :return: None
-    '''
-
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
-    # fn = fn +  '.' + feature_type + '.' +  cur_time()
-    fn = '{}.{}.{}.{}.{}.{}.{}.{}'.format(feature_type, fn, n_neighbors, p,
-                                          'reliable' if reliable else 'unreliable', weight, training_scale, cur_time())
-    result_path = RESULTS_PATH + '/results/' + fn
-    if not os.path.exists(result_path):
-        os.mkdir(result_path)
-
-    with open(result_path + '/result.txt', 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an student answer
-                # Train knn for each answer with all other answers
-                scale = 0
-                features_all = []
-                scores_all = []
-                for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
-                        [True] * len(data_dict[qid]['diff']))
-                    if qid != que_id:
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                    else:
-                        array_filter[i] = False
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                        # scores_truth = np.delete(data_dict[qid]['scores_truth'], i, 0)
-                        # features = np.delete(data_dict[qid]['features'], i, 0)
-                    features_all.append(np.array(features))
-                    scores_all.append(np.array(scores_truth))
-                    scale += len(features)
-                    if scale >= training_scale > 0:
-                        print('scale: ', scale)
-                        break
-                X = np.concatenate(features_all)
-                Y = np.concatenate(scores_all)
-                Y = (Y * 2).astype(int) # Here Y need to be int as a labels, that's why *2 is needed.
-                                        # Y comes from average scores of two ground truth, so there're .5 scores.
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-                if n_neighbors > len(X):
-                    n_neighbors = len(X)
-                clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight, p=p)
-                clf.fit(X, Y)
-
-                # predict
-                score = clf.predict(feature_i) / 2
-                error = score_truth_i - score[0]
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                question = data_dict[que_id]["question"]
-                ans_ref = data_dict[que_id]["ans_ref"]
-                ans_stu = data_dict[que_id]["ans_stu"][i]
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu), file=fr)
-
-def run_kmeans(fn, feature_type, reliable, k, training_scale = 0):
-    '''
-    Run knn algorithm using all other answers as training data.
-    :param fn: File name to save the results.
-    :param feature_type: For now it may be one of 'g', 'b' or 'gb'.
-    :param reliable:
-        When `reliable` is True, answers whose score is with diff over 2 will
-        be removed from training data
-    :param n_neighbors: Parameter for KNN. The number neighbors.
-    :param weight:
-        Weight function used in prediction. Possible values:
-        ‘uniform’ : uniform weights. All points in each neighborhood are weighted equally.
-        ‘distance’ : weight points by the inverse of their distance. in this case,
-            closer neighbors of a query point will have a greater influence than neighbors
-            which are further away.
-        [callable] : a user-defined function which accepts an array of distances,
-            and returns an array of the same shape containing the weights.
-    :return: None
-    '''
-
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
-    # fn = fn +  '.' + feature_type + '.' +  cur_time()
-    fn = '{}.{}.{}.{}.{}.{}'.format(feature_type, fn, k, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
-    result_path = RESULTS_PATH + '/results/' + fn
-    if not os.path.exists(result_path):
-        os.mkdir(result_path)
-
-    with open(result_path + '/result.txt', 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an student answer
-                # Train kmeans for each answer with all other answers
-                scale = 0
-                features_all = []
-                scores_all = []
-                for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
-                        [True] * len(data_dict[qid]['diff']))
-                    if qid != que_id:
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                    else:
-                        array_filter[i] = False
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                        # scores_truth = np.delete(data_dict[qid]['scores_truth'], i, 0)
-                        # features = np.delete(data_dict[qid]['features'], i, 0)
-                    features_all.append(np.array(features))
-                    scores_all.append(np.array(scores_truth))
-                    scale += len(features)
-                    if scale >= training_scale > 0:
-                    #     print('scale: ', scale)
-                        break
-                X = np.concatenate(features_all)
-                Y = np.concatenate(scores_all)
-                Y = (Y * 2).astype(int)
-
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-
-                kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
-                label_i = kmeans.predict(feature_i)
-
-                # connect labels to scores
-                scores = Y[kmeans.labels_ == label_i[0]]
-                # print('socres:', scores)
-                # print('label_i', label)
-                count = len(scores)
-                score = sum(scores) / count / 2
-
-                # dict_score_label, dict_label_score = {}, {}
-                # for label in range(0, k):
-                #     scores = Y[kmeans.labels_==label]
-                #     count = len(scores)
-                #     dict_score_label[]
-                #     pass
-
-
-                # predict
-                # score = clf.predict(feature_i) / 2
-                error = score_truth_i - score
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                question = data_dict[que_id]["question"]
-                ans_ref = data_dict[que_id]["ans_ref"]
-                ans_stu = data_dict[que_id]["ans_stu"][i]
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu), file=fr)
-
-def run_kmeans_question_wise(fn, feature_type, reliable, k, training_scale = 0):
-    '''
-    Run knn algorithm using all other answers as training data.
-    :param fn: File name to save the results.
-    :param feature_type: For now it may be one of 'g', 'b' or 'gb'.
-    :param reliable:
-        When `reliable` is True, answers whose score is with diff over 2 will
-        be removed from training data
-    :param n_neighbors: Parameter for KNN. The number neighbors.
-    :param weight:
-        Weight function used in prediction. Possible values:
-        ‘uniform’ : uniform weights. All points in each neighborhood are weighted equally.
-        ‘distance’ : weight points by the inverse of their distance. in this case,
-            closer neighbors of a query point will have a greater influence than neighbors
-            which are further away.
-        [callable] : a user-defined function which accepts an array of distances,
-            and returns an array of the same shape containing the weights.
-    :return: None
-    '''
-
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
-    # fn = fn +  '.' + feature_type + '.' +  cur_time()
-    fn = '{}.{}.{}.{}.{}.{}'.format(feature_type, fn, k, 'reliable' if reliable else 'unreliable', training_scale, cur_time())
-    result_path = RESULTS_PATH + '/results/' + fn
-    if not os.path.exists(result_path):
-        os.mkdir(result_path)
-
-    with open(result_path + '/result.txt', 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an answer
-                # Train knn for each answer with all other answers
-
-                # remove unreliable training data
-                array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
-                    [True] * len(data_dict[que_id]['diff']))
-                # remove current answer (to be predicted)
-                array_filter[i] = False
-
-                scores_truth = data_dict[que_id]['scores_truth'][array_filter]
-                features = data_dict[que_id]['features'][array_filter]
-
-                X = features[:training_scale] if training_scale > 0 else features
-                Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
-                # Y = (Y * 2).astype(int)
-
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-
-                kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
-                label_i = kmeans.predict(feature_i)
-
-                # connect labels to scores
-                scores = Y[kmeans.labels_ == label_i[0]]
-                # print('socres:', scores)
-                # print('label_i', label)
-                count = len(scores)
-                score = sum(scores) / count
-
-                # dict_score_label, dict_label_score = {}, {}
-                # for label in range(0, k):
-                #     scores = Y[kmeans.labels_==label]
-                #     count = len(scores)
-                #     dict_score_label[]
-                #     pass
-
-
-                # predict
-                # score = clf.predict(feature_i) / 2
-                error = score_truth_i - score
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                question = data_dict[que_id]["question"]
-                ans_ref = data_dict[que_id]["ans_ref"]
-                ans_stu = data_dict[que_id]["ans_stu"][i]
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score, score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score, score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu), file=fr)
-
-def run_knn_question_wise(fn, feature_type, reliable, n_neighbors, weight, p=2, training_scale = 0, regression=False):
-    '''
-    Run knn algorithm using all other answers under the same question as training data.
-    :param fn: File name to save the results.
-    :param feature_type: For now it may be one of 'g', 'b' or 'gb'.
-    :param reliable:
-        When `reliable` is True, answers whose score is with diff over 2 will
-        be removed from training data
-    :param n_neighbors: Parameter for KNN. The number neighbors.
-    :param weight:
-        Weight function used in prediction. Possible values:
-        ‘uniform’ : uniform weights. All points in each neighborhood are weighted equally.
-        ‘distance’ : weight points by the inverse of their distance. in this case,
-            closer neighbors of a query point will have a greater influence than neighbors
-            which are further away.
-        [callable] : a user-defined function which accepts an array of distances,
-            and returns an array of the same shape containing the weights.
-    :return: None
-    '''
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
-    # fn = fn +  '.' + feature_type + '.' +  cur_time()
-    fn = '{}.{}.{}.{}.{}.{}.{}.{}'.format(feature_type, fn, n_neighbors, p,
-                                          'reliable' if reliable else 'unreliable', weight, training_scale, cur_time())
-    result_path = RESULTS_PATH + '/results/' + fn
-    if not os.path.exists(result_path):
-        os.mkdir(result_path)
-
-    with open(result_path + '/result.txt', 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an answer
-                # Train knn for each answer with all other answers
-
-                # remove unreliable training data
-                array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
-                    [True] * len(data_dict[que_id]['diff']))
-                # remove current answer (to be predicted)
-                array_filter[i] = False
-
-                scores_truth = data_dict[que_id]['scores_truth'][array_filter]
-                features = data_dict[que_id]['features'][array_filter]
-                no_of_answers = np.array(range(len(data_dict[que_id]['features'])))[array_filter]
-
-                X = features[:training_scale] if training_scale > 0 else features
-                Y = scores_truth[:training_scale] if training_scale > 0 else scores_truth
-                Y = (Y * 2).astype(int)
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-                if n_neighbors > len(X):
-                    n_neighbors = len(X)
-                if regression:
-                    clf = neighbors.KNeighborsRegressor(n_neighbors, weights=weight)
-                else:
-                    clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
-                clf.fit(X, Y)
-
-                # predict
-                score = clf.predict(feature_i) / 2
-                distance_of_neighbors, no_of_neighbors  = clf.kneighbors(feature_i, n_neighbors)
+            if 'knnc' == model or 'knnr' == model:
+                distance_of_neighbors, no_of_neighbors = runner.kneighbors(np.array([feature_i]),
+                                                                           model_params['n_neighbors'])
 
                 # Find the N.O. of nearest answers by features
-                n_s = ['{}.{}'.format(que_id,no_of_answers[no]+1) for no in no_of_neighbors[0]]
-                t_s = [Y[no]/2 for no in no_of_neighbors[0]]
+                n_s = ['{}.{}'.format(training_data.id_que[i], no_of_answers[no]) for no in no_of_neighbors[0]]
+                t_s = [Y[no] / 2 for no in no_of_neighbors[0]]
                 d_s = distance_of_neighbors[0]
-                # print(n_s, t_s, d_s)
-                # neighbor_truth_distance = zip(n_s, t_s, d_s)
-                # print("ntd:", list(neighbor_truth_distance))
-                # print()
-                # with open(result_path + '/neighbor_{}.{}.txt'.format(que_id, i), 'w') as f_neighbor:
-                #     for n, s, d in neighbor_truth_distance:
-                #         print(n,s,d)
-                #         print('{}\t{}'.format(n, s, d), file=f_neighbor)
-                # try:
-                #     score = clf.predict(feature_i) / 2
-                # except :
-                #     print("error id:{}.{}".format(que_id, i+1))
-                #     print("error: k=", n_neighbors)
-                error = score_truth_i - score[0]
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                question = data_dict[que_id]["question"]
-                ans_ref = data_dict[que_id]["ans_ref"]
-                ans_stu = data_dict[que_id]["ans_stu"][i]
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i,
-                                                                              error,
-                                                                              error_abs, error_round, question, ans_ref,
-                                                                              ans_stu, n_s, t_s, d_s), file=fr)
 
-def score_question_wise(fn, clf, feature_type, reliable=True):
-    '''
-    Train SVR model for each answer with all the other answers under the same question.
-    When `reliable` is True, answers whose score is with diff over 2 will be removed
-    from training data
-    '''
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, ans_id,
+                    score[0],
+                    score_truth_i,
+                    error,
+                    error_abs,
+                    error_round,
+                    question,
+                    ans_ref,
+                    ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, ans_id, score[0],
+                    score_truth_i,
+                    error,
+                    error_abs, error_round,
+                    question, ans_ref,
+                    ans_stu, n_s, t_s),
+                    file=fr)
+                # with open(result_path + '/features.txt', 'a') as f_features:
+                #     print('X of {}.{}:'.format(que_id, ans_id),  X, file=f_features)
+            elif 'svr' == model:
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, i + 1, score[0], score_truth_i,
+                    error,
+                    error_abs, error_round, question, ans_ref,
+                    ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, i + 1, score[0], score_truth_i,
+                    error,
+                    error_abs, error_round, question, ans_ref, ans_stu),
+                    file=fr)
 
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
-    fn = RESULTS_PATH + '/' + fn + '.' + cur_time()
-    print(fn)
-    with open(fn, 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an answer
-                # Train knn for each answer with all other answers
-
-                # remove unreliable training data
-                array_filter = data_dict[que_id]['diff'] < 3 if reliable else np.array(
-                    [True] * len(data_dict[que_id]['diff']))
-                # remove current answer (to be predicted)
-                array_filter[i] = False
-
-                scores_truth = data_dict[que_id]['scores_truth'][array_filter]
-                features = data_dict[que_id]['features'][array_filter]
-
-                X = features
-                Y = scores_truth
-                Y = (Y * 2).astype(int)
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-                clf.fit(X, Y)
-
-                # predict
-                score = clf.predict(feature_i) / 2
-                error = score_truth_i - score[0]
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round), file=fr)
+            elif 'cos' == model:
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, i + 1, score[0], score_truth_i,
+                    error,
+                    error_abs, error_round, question, ans_ref,
+                    ans_stu))
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, i + 1, score[0], score_truth_i,
+                    error,
+                    error_abs, error_round, question, ans_ref, ans_stu),
+                    file=fr)
 
 
-def score(fn, clf, feature_type, reliable=True):
-    # When `reliable` is True, answers whose score is with diff over 2 will be removed
-    # from training data
+class Feature:
+    def __init__(self, f_w2v=None, nlp=None, tokenizer=None, lemmatizer=None):
+        self.__scores = []  # Scores of training data
+        self.__weights = {}  # Weights of each words
+        self.__voc = []  # Vocabulary of training data. Weight of words not in this list is 0.
+        self.__w2v = None  # Trained word2vec instance
+        self.__sent_words = []  # Stemmed words list of each answer.
+        self.d_vec = 100  # Dimension of vector from w2v
+        self.__vec_sent_words = []  # Vector version of self.__sent_words
 
-    feature_path = RESULTS_PATH + '/features_{}/'.format(feature_type)
-    data_dict = read_training_data(feature_path)
+        self.__nlp = spacy.load('en') if not nlp else nlp
+        self.__tokenizer = tokenizer if tokenizer else spacy.tokenizer.Tokenizer(self.__nlp.vocab)
+        self.__lemmatizer = lemmatizer if lemmatizer else spacy.lemmatizer.Lemmatizer(LEMMA_INDEX, LEMMA_EXC,
+                                                                                      LEMMA_RULES)
+        if f_w2v:
+            self.__w2v = Word2Vec.load(f_w2v)
 
-    with open(fn, 'w') as fr:
-        for que_id in data_dict:
-            for i in range(len(data_dict[que_id]['scores_truth'])):
-                # i refers an answer
+    def __sent2vec(self, sent, weights=None):
+        '''
+            generate sentence vectors based on vector of words
+            :param sent: iterable variable of words in the sentence
+            :return: a vector with dimension of self.d_vec (same to w2v)
+            '''
+        if not weights:
+            weights = self.__weights
+        vec_sent = np.zeros(self.d_vec)
+        for word in sent:
+            if word not in weights or word not in self.__w2v:  # TODO: The second condition need check
+                continue
+            vec_sent += weights.get(word, 0) * self.__w2v[word]
+        return vec_sent/len(sent)
 
-                # Train svr for each answer with all other answers
-                features_all = []
-                scores_all = []
-                for qid in data_dict:
-                    array_filter = data_dict[qid]['diff'] < 3 if reliable else np.array(
-                        [True] * len(data_dict[qid]['diff']))
-                    if qid != que_id:
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                    else:
-                        array_filter[i] = False
-                        scores_truth = data_dict[qid]['scores_truth'][array_filter]
-                        features = data_dict[qid]['features'][array_filter]
-                    features_all.append(np.array(features))
-                    scores_all.append(np.array(scores_truth))
-                X = np.concatenate(features_all)
-                Y = np.concatenate(scores_all)
-                Y = (Y * 2).astype(int)
-                score_truth_i = data_dict[que_id]['scores_truth'][i]
-                feature_i = data_dict[que_id]['features'][i:i + 1]
-                clf.fit(X, Y)
+    def __hf(self, weights, s1, s2):
+        '''
+        hyper function
+        :param weights: dict(word:weight)
+        :param s1:
+        :param s2: set of words of sentence1 and sentence2
+        :return: a value between 0 and 1
+        '''
 
-                # predict
-                score = clf.predict(feature_i) / 2
-                error = score_truth_i - score[0]
-                error_abs = abs(error)
-                error_round = round(error_abs)
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}'.format(que_id, i + 1, score[0], score_truth_i, error,
-                                                                  error_abs, error_round), file=fr)
+        def norm_of_vec(v):
+            norm = np.dot(v, v)
+            if type(norm) == np.float64:
+                return np.sqrt(norm)
+            return np.sqrt(norm._value)
+
+        def cos_distance(v1, v2):
+            norm1 = norm_of_vec(v1)
+            norm2 = norm_of_vec(v2)
+            if norm1 == 0:
+                return norm2
+            if norm2 == 0:
+                return norm1
+            # if dot > 1:
+            #     print("dot > 1: ", dot, res)
+            return (1.0 - np.dot(v1, v2) / (norm1 * norm2))/2
+
+        # return similarity between two sentence
+        return cos_distance(s1, s2)
+
+    def __loss_func(self, weights):
+        loss = []
+        weights_dict = dict(zip(self.__voc, weights))
+        # Generate vector of answers
+        vector_ans = [self.__sent2vec(ans, weights_dict) for ans in self.__sent_words]
+        for i in range(len(vector_ans)):
+            ws1 = vector_ans[i]
+            for j in range(i, len(vector_ans)):
+                ws2 = vector_ans[j]
+                distance = self.__hf(weights, ws1, ws2)
+                loss.append(distance if self.__scores[i] == self.__scores[j] else 1 - distance)
+        loss = sum(loss) / len(loss)
+        print('loss:', loss)
+        return loss
+
+    def _fit(self, answers, scores, f_w2v=None):
+        '''
+        Prepare for generating vectors for answers.
+        * Generate vocabulary
+        * Train word2vec instance if necessary
+        * Calculate weight for each word
+        :param answers: A list of raw data of answers
+        :param scores: A list of scores as training data. The length need to be
+                        the same with with the list of answers
+        :param f_w2v: An instance of word2vec. If not provided, a new one will be trained
+                        with the vocabulary
+        :return: None
+        '''
+
+        assert len(answers) == len(scores)
+        # weight = [0] * len(words)
+        # self.weight = dict(zip(words, weight))
+
+        # Generate bag of words for each sentence
+        self.__scores = scores[:]
+        words = []
+        st = PorterStemmer()
+        for a in answers:
+            words.append(set(read_voc(text=a, stemmer=st)))
+        self.__sent_words = words[:]
+        assert len(words) == len(answers)
+
+        # calculate weights for each word in vocabulary
+        self.__voc = list(reduce(lambda x, y: x | y, words))
+        l_answers = len(answers)
+        for i, j in [(i, j) for i in range(l_answers) for j in range(l_answers)]:
+            if i == j:
+                continue
+            # TODO: The algorithm to weight words need to be updated
+            if scores[i] == scores[j]:
+                for word in words[i] & words[j]:
+                    self.__weights[word] = self.__weights.get(word, 0) + 1
+                for word in words[i] ^ words[j]:
+                    self.__weights[word] = self.__weights.get(word, 0) - 1
+
+            if scores[i] != scores[j]:
+                for word in words[i] & words[j]:
+                    self.__weights[word] = self.__weights.get(word, 0) - 1
+                for word in words[i] ^ words[j]:
+                    self.__weights[word] = self.__weights.get(word, 0) + 1
+
+            for w in self.__weights:
+                self.__weights[w] = sigmoid(self.__weights[w])
+
+        # print(sorted(self.weights.items(), key=lambda d:d[1], reverse=True)[:11])
+
+        if not f_w2v:
+            # No w2v model is provided, then train a new one use current vocabulary
+            voc = [nltk.word_tokenize(s) for s in answers]
+            self.__w2v = Word2Vec(voc, min_count=1)
+        else:
+            self.__w2v = Word2Vec.load(f_w2v)
+
+            # Generate vectors for query answer
+            # for words in self.sent_words:
+            #     self.vec_sent.append(self.sent2vec(words))
+
+            # training knn model
+
+    def fit(self, answers, scores):
+        '''
+        Prepare for generating vectors for answers.
+        * Generate vocabulary
+        * Train word2vec instance if necessary
+        * Calculate weight for each word
+        :param answers: A list of raw data of answers
+        :param scores: A list of scores as training data. The length need to be
+                        the same with with the list of answers
+        :param f_w2v: path/to/file of an instance of word2vec model. If not provided, a new one will be trained
+                        with the vocabulary
+        :return: None
+        '''
+
+        assert len(answers) == len(scores)
+
+        self.__scores = scores[:]
+
+        # Tokenize each answer with lemmatization
+        if self.__w2v:
+            # if word2vec model is provided, the vector of answer words will be generated at the same time
+            words_of_ans = []
+            word_vectors_of_ans = []
+            for ans in answers:
+                doc = self.__nlp(ans)
+                ws = [lemmatizer(doc[i].string, doc[i].pos)[0] for i in range(len(doc)) if doc[i].pos_ != u'PUNCT']
+                words_of_ans.append(ws)
+                vs = [self.__w2v[w] if w in self.__w2v else np.zeros(self.d_vec) for w in ws]
+                word_vectors_of_ans.append(vs)
+            self.__sent_words = words_of_ans
+            self.__vec_sent_words = word_vectors_of_ans
+        else:
+            # if word2vec model is not provided, generate tokens first, train the word2vec model
+            # with tokens, and generate the vectors of answer words at last
+            words_of_ans = []
+            word_vectors_of_ans = []
+            for ans in answers:
+                doc = self.__nlp(ans)
+                ws = [lemmatizer(doc[i].string, doc[i].pos)[0] for i in range(len(doc)) if doc[i].pos_ != u'PUNCT']
+                words_of_ans.append(ws)
+                self.__sent_words = words_of_ans
+            self.__w2v = Word2Vec(self.__sent_words, min_count=1)
+            for ws in self.__sent_words:
+                vs = [self.__w2v[w] if w in self.__w2v else np.zeros(self.d_vec) for w in ws]
+                word_vectors_of_ans.append(vs)
+            self.__vec_sent_words = word_vectors_of_ans
+
+        assert len(words_of_ans) == len(answers)
+
+        # Generate vocabulary based on all training data
+        self.__voc = set(reduce(lambda x, y: set(x) | set(y), words_of_ans))
+
+        # calculate weights for each word in vocabulary
+        weights = np.ones(len(self.__voc)) / 100
+        grad_desent = grad(self.__loss_func)
+
+        for i in range(100):
+            print("%dth round training weight" % i)
+            gradient = grad_desent(weights)
+            weights -= 0.07 * gradient
+            # print("gradient:", gradient)
+            # print("weights:", weights)
+
+        self.__weights = dict(zip(self.__voc, weights))
+        print(sorted(self.__weights.items(), key=lambda d: d[1], reverse=True)[:11])
+
+    def feature(self, sent):
+        # feature_file = RESULTS_PATH + "/features_weighted_bow/" + fn
+        return self.__sent2vec(sent)
 
 
-def score_svr(fn='svr.all', reliable=True):
-    clf = SVR()
-    score(fn, clf, reliable)
+class CosineKNN():
+    def __init__(self, n_neighbors=5, dist_func='cos'):
+        self.n_neighbors = n_neighbors
+        self.dist_func = None
+        if 'cos' == dist_func:
+            self.dist_func = spatial.distance.cosine
+        elif 'l2' == dist_func:
+            def euclidean(x, y):
+                return np.linalg.norm(x - y)
+
+            self.dist_func = euclidean
+
+    def fit(self, X, Y):
+        self.x = X
+        self.y = Y
+
+    def predict(self, vecs):
+        # compute cosine similarity
+        # find top N largest ones
+        # calculate score by average
+        preds = []
+        for vec in vecs:
+            distance = []
+            for v_x in self.x:
+                distance.append(self.dist_func(v_x, vec))
+            sim_score = zip(distance, self.y)
+            neighbor_scores = list(zip(*sorted(sim_score)))[1][:self.n_neighbors]
+            assert neighbors
+            preds.append(sum(neighbor_scores) / len(neighbor_scores))
+        return np.array(preds)
 
 
-def score_svr_question_wise(fn='svr.all', reliable=True):
-    clf = SVR()
-    score_question_wise(fn, clf, reliable)
+def generate_features_sent2vec():
+    feature_path = RESULTS_PATH + "/features_sent2vec/"
+    if not os.path.exists(feature_path):
+        os.makedirs(feature_path)
+
+    for que_id in sorted(os.listdir(RAW_PATH_STU)):
+        print("\n" + que_id)
+        # generate bow features
+        with open(RAW_PATH_STU + "/" + que_id, 'r', errors="ignore") as f_ans, \
+                open(DATA_PATH + '/scores/{}/ave'.format(que_id), 'r') as f_score, \
+                open(feature_path + "/" + que_id, 'w') as f_fea:
+            arr_ans = np.array(f_ans.readlines())
+            scores = np.array(f_score.readlines())
+            bar = progressbar.ProgressBar(max_value=len(arr_ans))  # progressbar
+            bar_i = 0  # progressbar
+            for i in range(len(arr_ans)):
+                filter = np.array([True] * len(arr_ans))
+                filter[i] = False
+
+                fea = Feature()
+                fea.fit(arr_ans[filter], scores[filter])
+                feature = fea.feature(nltk.word_tokenize(arr_ans[i]))
+                print(*feature, file=f_fea, sep=',')
+                bar.update(bar_i)  # progressbar
+                bar_i += 1  # progressbar
 
 
-def score_knn(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='distance'):
-    clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
-    score(fn, clf, feature_type, reliable)
+def train_w2v(fn, model_name, tokenizer):
+    with open(fn, 'r', errors='ignore') as f_sents:
+        voca = []
+        for l in f_sents:
+            voca.append(l.split())
+        model = Word2Vec(voca, min_count=5)
+        model.save(RESULTS_PATH + "/models_w2v/" + model_name)
 
 
-def score_knn_question_wise(fn='knn.all', feature_type='gb', reliable=True, n_neighbors=10, weight='distance'):
-    clf = neighbors.KNeighborsClassifier(n_neighbors, weights=weight)
-    score_question_wise(fn, clf, feature_type, reliable)
+def weight_test(que_id, nlp=None, tokenizer=None, lemmatizer=None):
+    with open(DATA_PATH + "/raw/ans_stu/" + que_id, 'r') as fq, \
+            open(DATA_PATH + "/scores/" + que_id + "/ave", 'r') as fs:
+        f_w2v = RESULTS_PATH + '/models_w2v//w2v_all'
+        raw_answers = fq.readlines()
+        raw_scores = fs.readlines()
+        g = Feature(f_w2v, nlp, tokenizer, lemmatizer)
+        g.fit(raw_answers, raw_scores)
 
-
-def count_error(fn):
-    # with open(fn, 'r') as fe, open('error.count.txt', 'w') as ec,\
-    #         open('error_abs.count.txt', 'w') as eac,\
-    #         open('error_round.count.txt', 'w') as erc:
-    result_path = RESULTS_PATH + '/results/' + fn
-
-    with open(result_path + '/result.txt' , 'r') as fe, \
-            open(result_path + '/errors', 'w') as fo:
-        svr_all = map(lambda line: line.split(':'), fe.readlines())
-        _, score, truth, error, error_abs, error_round = zip(*svr_all)
-        count = len(error)
-        score = map(float, score)
-        truth = map(float, truth)
-        error = map(float, error)
-        error_abs = map(float, error_abs)
-        error_round = map(float, error_round)
-        rms = sqrt(mean_squared_error(list(score), list(truth)))
-
-        def count_hist(error_hist, echo=False):
-            k = list(np.arange(-4.5, 5.1, 0.5))
-            v = [0] * 20
-            hist = dict(zip(k, v))
-            for e in error_hist:
-                for k in hist:
-                    if e <= k:
-                        hist[k] += 1
-                        break
-            return hist
-            # for k,v in hist.items():
-            #     f.write("{}\t{}\n".format(k, v))
-            # f.write('{}\t{}\n'.format(count, sum(hist.values())))
-
-        d_error = count_hist(error)
-        d_error_abs = count_hist(error_abs)
-        d_error_round = count_hist(error_round)
-        errors = zip(d_error.keys(), d_error.values(), d_error_abs.values(), d_error_round.values())
-        errors = map(lambda line: '\t'.join(map(str, line)) + '\n', errors)
-        fo.writelines(errors)
-        fo.write('{}\t{}\t{}\t{}\n'.format(count, sum(d_error.values()), sum(d_error_abs.values()),
-                                           sum(d_error_round.values())))
-        fo.write('RMSE:' + str(rms) + '\n')
-
-def remove_scores():
-    cur_path = sys.path[0]
-    scores_path = DATA_PATH + "/scores/"
-    scores = os.listdir(scores_path)
-    for score_path in scores:
-        me = scores_path + score_path + "/me"
-        other = scores_path + score_path + "/other"
-        diff = scores_path+ score_path + '/diff'
-        print('me: ', me)
-        print('other: ', other)
-        with open(me, 'r') as fm, open(other, 'r') as fo, open(diff, 'w') as fd:
-            score_me = np.array(list(map(float, fm.readlines())))
-            score_other = np.array(list(map(float, fo.readlines())))
-            fd.writelines('\n'.join(list(map(str, abs(score_me - score_other)))))
 
 if __name__ == '__main__':
     # run_procerpron_learning()
-    # run_gen_features()
-    # remove_scores()
+    # read_training_data("/features_bow_1gram/")
 
-    # print("\ngenerating feature: bow_1gram")
-    # generate_features_bow(grams_n_list=[1], ref=True, char_gram=False)
-    # generate_features_bow(grams_n_list=[2], ref=True, char_gram=False)
+    # training w2v
+    nlp = spacy.load('en')
+    tokenizer = spacy.tokenizer.Tokenizer(nlp.vocab)
+    lemmatizer = spacy.lemmatizer.Lemmatizer(LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES)
 
-    # print("runing svr...")
-    run_svr_question_wise("svr_linear_qwise_stem", 'bow_1gram', True, fn_bow='bow_1gram', training_scale=0, kernel='linear')
-    run_svr_question_wise("svr_linear_qwise_stem", 'bow_2gram', True, fn_bow='bow_2gram', training_scale=0, kernel='linear')
-    run_svr_question_wise("svr_rbf_qwise_stem", 'bow_1gram', True, fn_bow='bow_1gram', training_scale=0, kernel='rbf')
-    run_svr_question_wise("svr_rbf_qwise_stem", 'bow_2gram', True, fn_bow='bow_2gram', training_scale=0, kernel='rbf')
-    # for k in [5, 10, 20, 30]:
-    #     print("runing knn with k of ",k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_2gram_char", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_2gram_char", reliable=False, n_neighbors=k, weight="distance")
-
-    # print("runing svr...")
-    # run_svr_question_wise("svr_qwise", 'bow_3gram_char', True, 0)
-    # for k in [5, 10, 20, 30]:
-    #     print("runing knn with k of ",k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_3gram_char", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_3gram_char", reliable=False, n_neighbors=k, weight="distance")
-    #
-    # print("runing svr...")
-    # run_svr_question_wise("svr_qwise", 'bow_4gram_char', True, 0)
-    # for k in [5, 10, 20, 30]:
-    #     print("runing knn with k of ",k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_4gram_char", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_4gram_char", reliable=False, n_neighbors=k, weight="distance")
-    #
-    # print("runing svr...")
-    # run_svr_question_wise("svr_qwise", 'bow_5gram_char', True, 0)
-    # for k in [5, 10, 20, 30]:
-    #     print("runing knn with k of ",k)
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_5gram_char", reliable=False, n_neighbors=k, weight="uniform")
-    #     run_knn_question_wise("knn_qwise", feature_type="bow_5gram_char", reliable=False, n_neighbors=k, weight="distance")
-    # run_knn_question_wise("knnc_qwise", feature_type="bow_1gram", reliable=True, n_neighbors=5, weight="distance")
-    # run_knn_question_wise("knnc_qwise", feature_type="bow_2gram", reliable=True, n_neighbors=5, weight="distance")
-    # run_knn_question_wise("knng_qwise", feature_type="bow_1gram", reliable=True, n_neighbors=5, weight="distance", regression=True)
-    # run_knn_question_wise("knng_qwise", feature_type="bow_2gram", reliable=True, n_neighbors=5, weight="distance", regression=True)
+    # w2v_train_file = RAW_PATH + '/all'
+    # train_w2v(w2v_train_file, 'w2v_all', tokenizer)
+    weight_test('11.7', nlp, tokenizer, lemmatizer)
+    # generate_features_sent2vec()
