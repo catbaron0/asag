@@ -1,7 +1,9 @@
 import os
 SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
-RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
+# RESULTS_PATH = SCRIPT_PATH + "/../results_kaggle_train"
+RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
 CURVE_PATH = RESULTS_PATH + "/curves"
 OUTPUT_FILE = 'error_curve.txt'
 
@@ -33,7 +35,7 @@ def read_data(path_name, title_type):
             if os.path.isfile(data_path + '/' + fn):
                 continue
             first_line.append(get_type[title_type](fn))
-            with open(data_path + '/' + fn + '/errors', 'r') as fe:
+            with open(data_path + '/' + fn + '/errors.txt', 'r') as fe:
                 ctnt = fe.readlines()[:-2]
                 ctnt = list(map(lambda s: s.split('\t')[2], ctnt))[9:]
                 data.append(ctnt)
@@ -42,4 +44,4 @@ def read_data(path_name, title_type):
         fo.write('\t'.join(first_line) + '\n')
         fo.writelines(data)
 
-read_data('gb.error_curve.svr_distance_uniform', 'name')
+read_data('w2v.error_curve.knnr.cos.svr.qwise.171222', 'name')
