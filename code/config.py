@@ -1,4 +1,6 @@
 import os
+import spacy
+from spacy.lang.en import LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES
 
 LEVENSHTEIN = 3
 
@@ -12,7 +14,7 @@ DATA_PATH = SCRIPT_PATH + "/../data/XCSD_6Ways/data"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-answers"
 # DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
-RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
+RESULTS_PATH = SCRIPT_PATH + "/../results_xcsd_6ways"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_xcsd_2ways"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_beetle_2Ways"
 # RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
@@ -27,3 +29,7 @@ W2V_PATH = SCRIPT_PATH + '/../data/glove.6B'
 W2V_FILE = 'glove.6B.300d.txt'
 
 WEIGHTS_PATH = RESULTS_PATH + "/word_weights"
+WEIGHT_SVR_PATH = RESULTS_PATH + "/word_weight_svr"
+NLP = spacy.load('en')
+# tokenizer = spacy.tokenizer.Tokenizer(nlp.vocab)
+LEMMATIZER = spacy.lemmatizer.Lemmatizer(LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES)

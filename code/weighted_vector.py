@@ -77,6 +77,7 @@ class Feature:
         self.__sent_words_list = []  # Stemmed words list of each answer.
         self.d_vec = 100  # Dimension of vector from w2v
         self.__vec_sent_words_list = []  # Vector version of self.__sent_words
+        self.__most_similar = dict()  # key: (
 
         # some initialization
         self.__nlp = spacy.load('en') if not instance_nlp else instance_nlp
@@ -92,6 +93,35 @@ class Feature:
             self.d_vec = vec_dimension
 
         self.__echo = False
+
+    def write_weight(self, fn):
+        string = ','.join(["{}:{}".format(k, w) for (k, w) in self.__weights_dict.items()]) + '\n'
+        fn.write(string)
+
+    def write_voc(self, fn):
+        string = ' '.join(self.__voc_list) + '\n'
+        fn.write(string)
+
+    def __similarity_words(self, w1, w2):
+        if not w1 or not w2 :
+            return 1
+        if w1 not in self.__w2v_dict:
+            # print("Word '{}' is not in w2v!".format(w1))
+            return 0
+        if w2 not in self.__w2v_dict:
+            # print("Word '{}' is not in w2v!".format(w2))
+            return 0
+        return 1 - spatial.distance.cosine(self.__w2v_dict[w1], self.__w2v_dict[w2])
+
+    def __calculate_most_similarites(self, limit = 11):
+        for word in self.__voc_list:
+            self.__most_similar[word] = sorted([(w, self.__similarity_words(word, w)) for w in self.__voc_list], reverse=True, key=lambda pair:pair[1])[1:1 + limit]
+
+    def write_mosti_similar(self, fn):
+        for word in self.__most_similar:
+            string = '{} {}'.format(word, ','.join(['{}:{}'.format(w, s) for (w, s) in self.__most_similar[word]])) + '\n'
+            fn.write(string)
+
 
     def __sent2vec(self, word_list, weights_dict=None):
         """
@@ -209,7 +239,7 @@ class Feature:
         assert len(answers_raw) == len(scores_raw)
 
         self.__scores_list = list(map(float, scores_raw[:]))
-        self.__sent_words_list = [set(token_lemma(str_ans, self.__nlp, self.__lemmatizer) for str_ans in answers_raw)]
+        self.__sent_words_list = [set(token_strip(str_ans, self.__nlp, self.__lemmatizer) for str_ans in answers_raw)]
         assert len(self.__sent_words_list) == len(answers_raw) == len(self.__scores_list)
 
         # calculate weights for each word in vocabulary
@@ -238,7 +268,7 @@ class Feature:
 
         if not self.__w2v_dict:
             # No w2v model is provided, then train a new one use current vocabulary
-            voc = [token_lemma(s, self.__nlp, self.__lemmatizer) for s in answers_raw]
+            voc = [token_strip(s, self.__nlp, self.__lemmatizer) for s in answers_raw]
             self.__w2v_dict = Word2Vec(voc, min_count=1)
 
     def fit(self, answers_raw, scores_raw, que_id = '', threshold_loss=0.35, threshold_epochs=10000, echo = False):
@@ -264,8 +294,8 @@ class Feature:
         # for ans in answers_raw:
         #     doc = self.__nlp(ans)
         #     words_of_ans.append(self.__lemmatizer(doc[i].string, doc[i].pos) for i in range(len(doc)))
-        self.__sent_words_list = np.array([token_lemma(ans, self.__nlp,
-                                                                   self.__lemmatizer) for ans in answers_raw])
+        self.__sent_words_list = np.array([token_strip(ans, self.__nlp, self.__lemmatizer) for ans in answers_raw])
+        # print("sent words list:", self.__sent_words_list)
         assert len(self.__sent_words_list) == len(answers_raw)
 
         # Generate training data and validation data
@@ -296,6 +326,7 @@ class Feature:
         # print("Generateing vocabulary...")
 
         self.__voc_list = list(set(reduce(lambda x, y: set(x) | set(y), self.__sent_words_list)))
+        # print("Voc list:", self.__voc_list)
         # print("Size of vocabular:", len(self.__voc_list))
 
         # calculate weights for each word in vocabulary
@@ -315,8 +346,7 @@ class Feature:
         objective_grad = autograd.grad(self.__objective)
         num_epochs = 300
         step_size = 0.001
-        weights = adam(objective_grad, weights, step_size=step_size,
-                       num_iters=num_epochs, callback=validation_fun)
+        weights = adam(objective_grad, weights, step_size=step_size, num_iters=num_epochs, callback=validation_fun)
         # while loss > threshold_loss and epochs < threshold_epochs:
         #     gradient = grad_desent(weights)
         #     weights -= alpha * gradient
@@ -329,49 +359,20 @@ class Feature:
         # loss = self.__loss_func_minibatch(weights, self.__validation_data)
         # print(loss)
         self.__weights_dict = dict(zip(self.__voc_list, weights))
-        print(sorted(self.__weights_dict.items(), key=lambda d: d[1], reverse=True)[:11])
+        self.__calculate_most_similarites()
+        # print(sorted(self.__weights_dict.items(), key=lambda d: d[1], reverse=True)[:11])
         # print("Fit done")
 
     def feature(self, sent):
         return self.__sent2vec(sent)
 
 
-class CosineKNN:
-    def __init__(self, n_neighbors=5, dist_func='cos'):
-        self.n_neighbors = n_neighbors
-        self.dist_func = None
-        self.x = None
-        self.y = None
-        if 'cos' == dist_func:
-            self.dist_func = spatial.distance.cosine
-        elif 'l2' == dist_func:
-            def euclidean(x, y):
-                return np.linalg.norm(x - y)
-
-            self.dist_func = euclidean
-
-    def fit(self, X, Y):
-        self.x = X
-        self.y = Y
-
-    def predict(self, vecs):
-        # compute cosine similarity
-        # find top N largest ones
-        # calculate score by average
-        preds = []
-        for vec in vecs:
-            distance = []
-            for v_x in self.x:
-                distance.append(self.dist_func(v_x, vec))
-            sim_score = zip(distance, self.y)
-            neighbor_scores = list(zip(*sorted(sim_score)))[1][:self.n_neighbors]
-            assert neighbors
-            preds.append(sum(neighbor_scores) / len(neighbor_scores))
-        return np.array(preds)
-
 
 def generate_features_sent2vec(fname_w2v, instance_nlp, instance_lemmatizer, q_list = None):
     feature_path = RESULTS_PATH + "/features_sent2vec/"
+    weight_path = RESULTS_PATH + "/word_weights"
+    voc_path = RESULTS_PATH + "/vocabulary"
+    word_similar_path = RESULTS_PATH + "/similar_words"
     if not os.path.exists(feature_path):
         os.makedirs(feature_path)
 
@@ -380,12 +381,15 @@ def generate_features_sent2vec(fname_w2v, instance_nlp, instance_lemmatizer, q_l
 
     if not q_list:
         q_list = sorted(os.listdir(RAW_PATH_STU))
+
     for que_id in q_list:
         print("\n" + que_id)
         # generate bow features
         with open(RAW_PATH_STU + "/" + que_id, 'r', errors="ignore") as f_ans, \
                 open(DATA_PATH + '/scores/{}/ave'.format(que_id), 'r') as f_score, \
-                open(feature_path + "/" + que_id, 'w') as f_fea:  # type: Optional[IO[str]]
+                open(voc_path + "/" + que_id, "w") as f_voc, \
+                open(feature_path + "/" + que_id, 'w') as f_fea:
+
             raw_answers = f_ans.readlines()
             for i in range(len(raw_answers)):
                 raw_answers[i] = ' '.join(raw_answers[i].split(' ')[1:])
@@ -402,11 +406,25 @@ def generate_features_sent2vec(fname_w2v, instance_nlp, instance_lemmatizer, q_l
                 print("Fitting...", end='')
                 fea.fit(arr_ans[data_filter], scores[data_filter],que_id = que_id)
                 print("done")
-                print("Generating...", end='')
-                feature = fea.feature(token_lemma(arr_ans[i], instance_nlp, instance_lemmatizer))
+                print("Writing weights...", end='')
+                with open("{}/{}.{}".format(weight_path, que_id, i+1), "w") as f_weight:
+                    fea.write_weight(f_weight)
                 print("done")
-                print('Feature:', *feature, sep=',')
+                print("Writing vocabulary...", end='')
+                fea.write_voc(f_voc)
+                print("done")
+
+                print("Writing similarities...", end='')
+                with open(word_similar_path + "/" + '{}.{}'.format(que_id, i+1), 'w') as f_sim:
+                    fea.write_mosti_similar(f_sim)
+                print("done")
+
+                print("Generating...", end='')
+                feature = fea.feature(token_strip(arr_ans[i], instance_nlp, instance_lemmatizer))
+
+                # print('Feature:', *feature, sep=',')
                 print(*feature, file=f_fea, sep=',')
+                print("done")
                 # bar.update(bar_i)  # progressbar
                 # bar_i += 1  # progressbar
 
@@ -457,7 +475,7 @@ def generate_features_sent2vec(fname_w2v, instance_nlp, instance_lemmatizer, q_l
 def weight_test(instance_nlp, instance_lemmatizer):
 
     test_list = ['11.3', '1.5', '10.2', '11.5', '2.5']
-    test_list = ['FaultFinding-BULB_C_VOLTAGE_EXPLAIN_WHY1', 'FaultFinding-BULB_ONLY_EXPLAIN_WHY6',  'FaultFinding-OTHER_TERMINAL_STATE_EXPLAIN_Q']
+    # test_list = ['FaultFinding-BULB_C_VOLTAGE_EXPLAIN_WHY1', 'FaultFinding-BULB_ONLY_EXPLAIN_WHY6',  'FaultFinding-OTHER_TERMINAL_STATE_EXPLAIN_Q']
     # test_list = ['2.5']
     print("Reading word2vec model from files:")
     f_w2v = W2V_PATH + "/" + W2V_FILE
@@ -484,15 +502,13 @@ if __name__ == '__main__':
     # read_training_data("/features_bow_1gram/")
 
     # training w2v
-    nlp = spacy.load('en')
-    # tokenizer = spacy.tokenizer.Tokenizer(nlp.vocab)
-    lemmatizer = spacy.lemmatizer.Lemmatizer(LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES)
-    doc = nlp('test test2')
+
 
     # w2v_train_file = RAW_PATH + '/all'
     file_w2v = W2V_PATH + "/" + W2V_FILE
     # weight_test(instance_nlp=nlp, instance_lemmatizer=lemmatizer)
     q_list = sorted(os.listdir(RAW_PATH_STU))
-    generate_features_sent2vec(file_w2v, nlp, lemmatizer, ['4.7'])
+    # generate_features_sent2vec(file_w2v, nlp, lemmatizer, ['1.1'])
+    generate_features_sent2vec(file_w2v, NLP, LEMMATIZER, q_list[0::5])
     # generate_features_sent2vec(file_w2v, nlp, lemmatizer)
     # generate_features_sent2vec_multi(file_w2v, nlp, lemmatizer)

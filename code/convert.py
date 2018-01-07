@@ -1,15 +1,35 @@
-from xml.etree.ElementTree import parse
 from xml.etree.ElementTree import ElementTree, Element
-import itertools, os
+import os
+basic_path = '../data/sciEntsBank_2Ways'
+question_paths = (
+    # basic_path + '/test-unseen-domains/',
+    # basic_path + '/test-unseen-questions/',
+    # basic_path + '/test-unseen-answers/',
+    # basic_path + '/train/'
+    basic_path + '/all/',
+)
+LABELS_5WAYS = dict((
+    ('non_domain', '0'),
+    ('irrelevant', '1'),
+    ('contradictory', '2'),
+    ('partially_correct_incomplete', '3'),
+    ('correct', '4')))
 
-question_paths = ('test-unseen-domains/', 'test-unseen-questions/', 'test-unseen-answers/', 'train/')
-Scores = dict((
-    ('non_domain', '1'),
-    ('irrelevant', '2'),
-    ('contradictory', '3'),
-    ('partially_correct_incomplete', '4'),
-    ('correct', '5')))
+LABELS_3WAYS = dict((
+    ('non_domain', '0'),
+    ('irrelevant', '0'),
+    ('contradictory', '0'),
+    ('partially_correct_incomplete', '1'),
+    ('correct', '2')))
+LABELS_2WAYS = dict((
+    ('non_domain', '0'),
+    ('incorrect', '0'),
+    ('irrelevant', '0'),
+    ('contradictory', '0'),
+    ('partially_correct_incomplete', '0'),
+    ('correct', '1')))
 
+Scores = LABELS_2WAYS
 
 def read_xml(in_path):
     '''''读取并解析xml文件
@@ -25,7 +45,7 @@ def read_parses(path_to_file):
     #     print(path_to_file)
     edges = []
     graph_id = os.path.split(path_to_file)[1].split('.')[0:-2]
-    graph_id = '.'.join(graph_id)
+    graph_id = '_'.join(graph_id)
 
     with open(path_to_file, 'r') as f_parse:
         lines = f_parse.readlines()
@@ -78,24 +98,45 @@ def read_parses(path_to_file):
 for question_path in question_paths:
     path_xml = question_path + '/Core/'
     path_raw = question_path + 'raw/'
+    if not os.path.exists(path_raw): os.mkdir(path_raw)
+
     path_scores = question_path + 'scores/'
+    if not os.path.exists(path_scores): os.mkdir(path_scores)
+
     path_parses = question_path + 'parses/'
+    if not os.path.exists(path_parses): os.mkdir(path_parses)
+
     raw_questions, raw_answers = [], []
     parses_ref, parses_que = [], [],
+    print(question_path)
+    print(os.listdir(path_xml))
     for f_xml in os.listdir(path_xml):
         scores, parses_stu, raw_ans_stu = [], [], []
         doc = read_xml(path_xml + f_xml)
         root = doc.getroot()
-        question_id = root.get('id')
+        # question_id = root.get('id')
+        question_id =  ''.join(f_xml.split('.')[:-1])
         question_text = root.find('questionText').text
         raw_questions.append(question_id + ' ' + question_text + '\n')
-        parses_que.append(read_parses(question_path + 'Dependency/Questions/' + question_id + '.txt.label'))
+        path_to_file = question_path + 'Dependency/Questions/'
+        # if not os.path.exists(path_to_file):
+        #     os.mkdir(path_to_file)
+        print('path_to_file', path_to_file)
+        print('question_id:', question_id)
+        # parses_que.append(read_parses(path_to_file + question_id + '.txt.label'))
 
         ref_ans = root.find('referenceAnswers/referenceAnswer')
-        ref_id = ref_ans.get('id')
+        ref_id = ''.join(f_xml.split('.')[:-1])
+        ref_id += '-' + ref_ans.get('id')
         raw_answers.append(ref_id + ' ' + ref_ans.text + '\n')
-        parses_ref.append(read_parses(question_path + 'Dependency/ReferenceAnswers/' + ref_id + '.txt.label'))
+        # path_to_file = question_path + 'Dependency/ReferenceAnswers/'
+        # if not os.path.exists(path_to_file):
+        #     os.mkdir(path_to_file)
+        # parses_ref.append(read_parses(path_to_file + ref_id + '.txt.label'))
 
+        # path_to_file = question_path + 'Dependency/StudentAnswersRaw/'
+        # if not os.path.exists(path_to_file):
+        #     os.mkdir(path_to_file)
         for ans_stu in root.iterfind('studentAnswers/studentAnswer'):
             ans_stu_id = ans_stu.get('id')
             ans_stu_score = Scores[ans_stu.get('accuracy')]
@@ -103,9 +144,9 @@ for question_path in question_paths:
 
             raw_ans_stu.append(ans_stu_id + ' ' + ans_stu_text + '\n')
             scores.append(ans_stu_score + '\n')
-            parse_stu = read_parses(question_path + 'Dependency/StudentAnswers/' + ans_stu_id + '.txt.label')
-            #             print(parse_stu)
-            parses_stu.append(parse_stu)
+            # parse_stu = read_parses(path_to_file + ans_stu_id + '.txt.label')
+            # parses_stu.append(parse_stu)
+
         # write raw for student answers
         with open(path_raw + question_id, 'wt') as f_raw_stu:
             f_raw_stu.writelines(raw_ans_stu)

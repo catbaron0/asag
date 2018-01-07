@@ -8,18 +8,15 @@ import collections
 from math import sqrt
 import re
 import math
-import sys
 import numpy as np
 
 np.set_printoptions(threshold=np.nan)
 
 from munkres import Munkres
 from nltk.metrics import *
-# from sklearn.feature_extraction.text import TfidfVectorizer
 import nltk
 import string
 import os
-# import progressbar
 import time
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn import neighbors
@@ -29,31 +26,16 @@ from sklearn.svm import SVR
 from gensim.models import Word2Vec
 import progressbar
 
-from nltk.corpus import brown
 from scipy import spatial
-from autograd import grad
+import autograd
 import spacy
 from spacy.lang.en import LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES
+import random
+from config import *
+from basic_util import token_lemma
 
 LEVENSHTEIN = 3
 
-# Paths
-SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = SCRIPT_PATH + "/../data/ShortAnswerGrading_v2.0/data"
-# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/train"
-# DATA_PATH = SCRIPT_PATH + "/../data/kaggle_train"
-# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-questions"
-# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-answers"
-# DATA_PATH = SCRIPT_PATH + "/../data/sciEntsBank/test-unseen-domains"
-RESULTS_PATH = SCRIPT_PATH + "/../results_sag"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_train"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_kaggle_train"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_uq"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ua"
-# RESULTS_PATH = SCRIPT_PATH + "/../results_semi_ud"
-
-RAW_PATH = DATA_PATH + "/raw"
-RAW_PATH_STU = DATA_PATH + "/raw/ans_stu"
 
 
 class Sentence:
@@ -177,6 +159,23 @@ def cur_time():
 def sigmoid(x):
     return 1 / (1 + math.exp(-x))
 
+def norm_of_vec(v):
+    norm = np.dot(v, v)
+    if type(norm) == np.float64:
+        return np.sqrt(norm)
+    return sqrt(norm._value)
+    # return np.linalg.norm(v)
+
+def cos_distance(vec1, vec2):
+    # if not isinstance(vec1, np.ndarray): vec1 = vec1._value
+    # if not isinstance(vec2, np.ndarray): vec2 = vec2._value
+    # norm1 = norm_of_vec(vec1)
+    # norm2 = norm_of_vec(vec2)
+    norm1 = autograd.numpy.linalg.norm(vec1)
+    norm2 = autograd.numpy.linalg.norm(vec2)
+    if norm1 == 0 or norm2 == 0:
+        return 1
+    return (1.0 - autograd.numpy.dot(vec1, vec2) / (norm1 * norm2))/2
 
 def overlap(syn1, syn2):
     def1 = set([word for word in re.split(r'[^a-zA-Z]', syn1.definition()) if word])
@@ -725,22 +724,16 @@ def tf_idf_weight_answer_v(ans_stu, ans_ins, answer_demoting=False):
     return [tfidf[0, col] for col in tfidf_values.nonzero()[1]]
 
 
-def stem_tokens(tokens, stemmer):
-    stemmed = set()
-    for item in tokens:
-        stemmed.add(stemmer.stem(item))
-    return stemmed
-
-
-def get_tokens(text, gram_n, char_gram, stemmer):
+def get_tokens(text, gram_n, char_gram):
     lower = text.lower()
-    remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
-    no_punctuation = lower.translate(remove_punctuation_map)
-    tokens = list(no_punctuation) if char_gram else nltk.word_tokenize(no_punctuation)
-    return nltk.ngrams(stem_tokens(tokens, stemmer), gram_n)
+    # remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
+    # no_punctuation = lower.translate(remove_punctuation_map)
+    # tokens = list(no_punctuation) if char_gram else nltk.word_tokenize(no_punctuation
+    tokens = token_lemma(lower, NLP, LEMMATIZER)
+    return list(nltk.ngrams(tokens, gram_n))
 
 
-def read_voc(text, stemmer):
+def read_voc(text):
     lower = text.lower()
     remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
     no_punctuation = lower.translate(remove_punctuation_map)
@@ -748,11 +741,12 @@ def read_voc(text, stemmer):
     return tokens
 
 
-def read_tokens_answer(answer, gram_n, char_gram, stemmer):
+def read_tokens_answer(answer, gram_n, char_gram):
     # Answers are starts with answer id
     # Remove answer id first before extract tokens
     answer = answer[answer.find(' ') + 1:]
-    return sorted(get_tokens(answer, gram_n=gram_n, char_gram=char_gram, stemmer=stemmer))
+    tokens = get_tokens(answer, gram_n=gram_n, char_gram=char_gram)
+    return sorted(tokens)
 
 
 def read_tokens_answers(que_id, gram_n, ref, char_gram):
@@ -766,26 +760,25 @@ def read_tokens_answers(que_id, gram_n, ref, char_gram):
         If ref is True, reference answer is needed and will be read in.
     :param char_gram:
         If char_gram is True, character n-gram will be applied.
+    :param query_id:
+        answers with idx in query_id will be skipped when generate vocabulary
     :return:
         An sorted list of token set.
     '''
-    stemmer = PorterStemmer()
     token_set = set()
     if ref:
         # read reference answer
         with open(RAW_PATH + "/answers", errors="ignore") as f_ref:
             for answer in f_ref.readlines():
                 if answer.startswith(que_id):
-                    token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram=char_gram,
-                                                                   stemmer=stemmer))
+                    token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram=char_gram))
                     break
 
     # read student answers
     with open(RAW_PATH_STU + "/" + que_id, "r", errors="ignore") as f_ans_raw:
         try:
             for answer in f_ans_raw.readlines():
-                token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram=char_gram,
-                                                               stemmer=stemmer))
+                token_set = token_set.union(read_tokens_answer(answer, gram_n=gram_n, char_gram=char_gram))
         except:
             print("error:", answer)
     assert token_set
@@ -806,7 +799,7 @@ def generate_features_bow(grams_n_list, ref, char_gram):
     :return:
         None. The featrues will be written to files named with n-gram
     '''
-    stemmer = PorterStemmer()
+    # stemmer = PorterStemmer()
     for que_id in sorted(os.listdir(RAW_PATH_STU)):
         print("\n" + que_id)
 
@@ -818,35 +811,80 @@ def generate_features_bow(grams_n_list, ref, char_gram):
         if not os.path.exists(feature_path):
             os.makedirs(feature_path)
 
-        tokens_que = {}
 
         # Read n-gram set from answers of question with id of que_id.
-        with open(feature_path + "/bow_{}".format(que_id), "wt", encoding='utf-8',
-                  errors="ignore") as f_bow:
-            for gram in grams_n_list:
-                tokens_que[gram] = tuple(read_tokens_answers(que_id, gram_n=gram, ref=ref, char_gram=char_gram))
-                f_bow.write("\t".join(map(','.join, tokens_que[gram])) + "\t")
+        with open(feature_path + "/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea,  \
+            open(RAW_PATH_STU + "/" + que_id, 'r', encoding='utf-8', errors='ignore') as f_ans:
+            voc_que = list()
+            ans_list = f_ans.readlines()
 
-        with open(feature_path + "/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea, \
-                open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
-            f_ans_lines = f_ans.readlines()
-            bar = progressbar.ProgressBar(max_value=len(f_ans_lines))
+            #generate vocabulary for each question
+            # with open('{}/vocabulary_svr/bow_{}'.format(RESULTS_PATH, que_id, i + 1), 'w', encoding='utf-8',
+            #           errors="ignore") as f_voc:
+            #     for gram in grams_n_list:
+            #         voc = set()
+            #         for ans in ans_list:
+            #             tokens = set(read_tokens_answer(ans, gram, char_gram))
+            #             # voc = {1}
+            #             voc = voc.union(tokens)
+            #         voc_que[i][gram] = sorted(list(voc))
+            #         f_voc.write('\t'.join([','.join(t) for t in voc_que[i][gram]]) + '\t')
+
+            bar = progressbar.ProgressBar(max_value=len(ans_list))
             bar_i = 0
-            for answer in f_ans_lines:
+            for i in range(len(ans_list)):
+                voc_que.append({})
+                # for each answer generate vocabulary
+                with open('{}/vocabulary_svr/bow_{}.{}'.format(RESULTS_PATH, que_id, i + 1), 'w', encoding='utf-8', errors="ignore") as f_voc:
+                    for gram in grams_n_list:
+                        voc = set()
+                        # for ans in ans_list[:i] + ans_list[i+1:]:
+                        for ans in ans_list:
+                            tokens = set(read_tokens_answer(ans, gram, char_gram))
+                            # voc = {1}
+                            voc = voc.union(tokens)
+                        voc_que[i][gram] = sorted(list(voc))
+                        f_voc.write('\t'.join([','.join(t) for t in voc_que[i][gram]])+'\t')
+
+                # generate features for each answer
                 features = []
                 for gram in grams_n_list:
-                    # Read n-gram sef from an answer and generate bow feature based on tokens_que for it.
-                    tokens_answer = set(read_tokens_answer(answer, gram_n=gram, char_gram=char_gram,
-                                                           stemmer=stemmer))
-                    bow = [1] * len(tokens_que[gram])
-                    for i in range(len(tokens_que[gram])):
-                        bow[i] = 1 if tokens_que[gram][i] in tokens_answer else 0
+                    tokens_answer = set(read_tokens_answer(ans_list[i], gram, False))
+                    bow = [1] * len(voc_que[i][gram])
+                    for j in range(len(voc_que[i][gram])):
+                        bow[j] = 1 if voc_que[i][gram][j] in tokens_answer else 0
                     features.extend(bow)
 
                 print(*features, file=f_fea, sep=',')
                 bar.update(bar_i)
                 bar_i += 1
-                # print(bow)
+
+
+
+        #
+        # with open(feature_path + "/bow_{}".format(que_id), "wt", encoding='utf-8',
+        #           errors="ignore") as f_bow:
+        #     for gram in grams_n_list:
+        #         tokens_que[gram] = tuple(read_tokens_answers(que_id, gram_n=gram, ref=ref, char_gram=char_gram))
+        #         f_bow.write("\t".join(map(','.join, tokens_que[gram])) + "\t")
+        #
+        # with open(feature_path + "/" + que_id, "wt", encoding='utf-8', errors="ignore") as f_fea, \
+        #         open(RAW_PATH_STU + "/" + que_id, "r", encoding='utf-8', errors="ignore") as f_ans:
+        #     f_ans_lines = f_ans.readlines()
+        #     bar = progressbar.ProgressBar(max_value=len(f_ans_lines))
+        #     bar_i = 0
+        #     for answer in f_ans_lines:
+        #         features = []
+        #         for gram in grams_n_list:
+        #             tokens_answer = set(token_lemma(answer, NLP, LEMMATIZER))
+        #             bow = [1] * len(voc_que[gram])
+        #             for i in range(len(voc_que[gram])):
+        #                 bow[i] = 1 if voc_que[i][gram][i] in tokens_answer else 0
+        #             features.extend(bow)
+        #
+        #         print(*features, file=f_fea, sep=',')
+        #         bar.update(bar_i)
+        #         bar_i += 1
 
 
 def generate_feature_g(ans_stu, ans_ins, que, w_phi, cache, ic):
@@ -1189,51 +1227,91 @@ def score_answer(fn_prefix, reliable, feature, model, model_params, qwise, train
                     error,
                     error_abs, error_round,
                     question, ans_ref,
-                    ans_stu, n_s, t_s),
+                    ans_stu, *n_s, *t_s),
                     file=fr)
                 # with open(result_path + '/features.txt', 'a') as f_features:
                 #     print('X of {}.{}:'.format(que_id, ans_id),  X, file=f_features)
             elif 'svr' == model:
+                if model_params['kernel'] == 'linear':
+                    # generate word_weights_dict
+                    with open('{}/vocabulary_svr/bow_{}.{}'.format(RESULTS_PATH, que_id, ans_id ), 'r', errors="ignore") as f_voc, \
+                        open('{}/word_weights_svr/{}.{}'.format(RESULTS_PATH, que_id, ans_id ), 'w') as f_weight:
+                        voc = f_voc.readline().strip().split('\t')
+                        weight = runner.coef_
+                        weight_dict = dict(zip(voc, weight[0]))
+                        string = ','.join(["{}:{}".format(k, w) for (k, w) in weight_dict.items()])
+                        f_weight.write(string)
+
                 print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
-                    que_id, i + 1, score[0], score_truth_i,
+                    que_id, ans_id, score[0], score_truth_i,
                     error,
                     error_abs, error_round, question, ans_ref,
                     ans_stu))
                 print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
-                    que_id, i + 1, score[0], score_truth_i,
+                    que_id, ans_id, score[0], score_truth_i,
                     error,
                     error_abs, error_round, question, ans_ref, ans_stu),
                     file=fr)
 
             elif 'cos' == model:
+                idx, dist = runner.k_nearest(np.array([feature_i]), model_params['n_neighbors'])
+                n_s = ['{}.{}'.format(training_data.id_que[i], no_of_answers[no]) for no in idx]
+                t_s = [Y[no] / 2 for no in idx]
                 print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
-                    que_id, i + 1, score[0], score_truth_i,
+                    que_id, ans_id, score[0], score_truth_i,
                     error,
                     error_abs, error_round, question, ans_ref,
                     ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
-                    que_id, i + 1, score[0], score_truth_i,
+                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    que_id, ans_id, score[0], score_truth_i,
                     error,
-                    error_abs, error_round, question, ans_ref, ans_stu),
+                    error_abs, error_round, question, ans_ref, ans_stu, *n_s, *t_s),
                     file=fr)
 
-
+def read_w2v(f_w2v):
+    w2v = dict()
+    print("reading w2v file...", end='')
+    with open(f_w2v, 'r', encoding='utf-8') as f:
+        for line in f:
+            data = line.split()
+            w2v[data[0]] = np.array(list(map(float, data[1:])))
+    with open(f_w2v, 'r') as f:
+        d_vec = len(f.readline().split()) - 1
+    return w2v, d_vec
 class Feature:
-    def __init__(self, f_w2v=None, nlp=None, tokenizer=None, lemmatizer=None):
+    def __init__(self, w2v=None, d_vec=None, nlp=None, lemmatizer=None, vali = 0.1):
         self.__scores = []  # Scores of training data
         self.__weights = {}  # Weights of each words
         self.__voc = []  # Vocabulary of training data. Weight of words not in this list is 0.
-        self.__w2v = None  # Trained word2vec instance
+        self.__w2v = dict()  # Trained word2vec instance
         self.__sent_words = []  # Stemmed words list of each answer.
         self.d_vec = 100  # Dimension of vector from w2v
         self.__vec_sent_words = []  # Vector version of self.__sent_words
 
         self.__nlp = spacy.load('en') if not nlp else nlp
-        self.__tokenizer = tokenizer if tokenizer else spacy.tokenizer.Tokenizer(self.__nlp.vocab)
         self.__lemmatizer = lemmatizer if lemmatizer else spacy.lemmatizer.Lemmatizer(LEMMA_INDEX, LEMMA_EXC,
                                                                                       LEMMA_RULES)
-        if f_w2v:
-            self.__w2v = Word2Vec.load(f_w2v)
+        self.__validation_data = None   # a list of answer couples:[((sent1, score1), (sent2, score2)), (), (),...]
+        self.__training_data = None     # a list of answer couples:[((sent1, score1), (sent2, score2)), (), (),...]
+        self.__cur = 0  # index of training data that is used for current epoch
+        self.__step = 1 # For each epoch, the weight will be updated using training_data[cur:step]
+        if not w2v:
+            # self.__w2v = Word2Vec.load(f_w2v)
+            self.__read_w2v(f_w2v)
+        else:
+            self.__w2v = w2v
+            self.d_vec = d_vec
+
+
+    def __read_w2v(self, f_w2c):
+        print("reading w2v file...", end='')
+        with open(f_w2c, 'r', encoding='utf-8') as f:
+            for line in f:
+                data = line.split()
+                self.__w2v[data[0]] = np.array(list(map(float, data[1:])))
+        with open(f_w2c, 'r') as f:
+            self.d_vec = len(f.readline().split()) - 1
+        print("done")
 
     def __sent2vec(self, sent, weights=None):
         '''
@@ -1245,12 +1323,18 @@ class Feature:
             weights = self.__weights
         vec_sent = np.zeros(self.d_vec)
         for word in sent:
-            if word not in weights or word not in self.__w2v:  # TODO: The second condition need check
+            if word not in weights:
+                print("Can't find word '{}' in weight dict.".format(word))
                 continue
+            if word not in self.__w2v:
+                print("Can't find word '{}' in Word2Vec".format(word))
+
+                continue
+            # vec_word = self.__w2v[word]
             vec_sent += weights.get(word, 0) * self.__w2v[word]
         return vec_sent/len(sent)
 
-    def __hf(self, weights, s1, s2):
+    def __distance_func(self, s1, s2):
         '''
         hyper function
         :param weights: dict(word:weight)
@@ -1259,52 +1343,97 @@ class Feature:
         :return: a value between 0 and 1
         '''
 
-        def norm_of_vec(v):
-            norm = np.dot(v, v)
-            if type(norm) == np.float64:
-                return np.sqrt(norm)
-            return np.sqrt(norm._value)
-
-        def cos_distance(v1, v2):
-            norm1 = norm_of_vec(v1)
-            norm2 = norm_of_vec(v2)
-            if norm1 == 0:
-                return norm2
-            if norm2 == 0:
-                return norm1
-            # if dot > 1:
-            #     print("dot > 1: ", dot, res)
-            return (1.0 - np.dot(v1, v2) / (norm1 * norm2))/2
-
         # return similarity between two sentence
-        return cos_distance(s1, s2)
+        # return spatial.distance.cosine(s1, s2)
+        distance = cos_distance(s1, s2)
+        return distance
 
-    def __loss_func(self, weights):
+    def __loss_func_mini(self, weights, sents = None):
         loss = []
         weights_dict = dict(zip(self.__voc, weights))
         # Generate vector of answers
-        vector_ans = [self.__sent2vec(ans, weights_dict) for ans in self.__sent_words]
+        if not sents:
+            loss_data = self.__training_data[self.__cur: self.__cur + self.__step]
+        else:
+            loss_data = sents[self.__cur: self.__cur + self.__step]
+        self.__cur = (self.__cur + self.__step) % len(self.__training_data)
+        loss = []
+        for data1, data2 in loss_data:
+            vec1 = self.__sent2vec(data1[0], weights_dict)
+            score1 = data1[1]
+            vec2 = self.__sent2vec(data2[0], weights_dict)
+            score2 = data2[1]
+            distance = self.__distance_func(vec1, vec2)
+            # if not isinstance(vec1, np.ndarray): vec1 = vec1._value
+            # if not isinstance(vec2, np.ndarray): vec2 = vec2._value
+            # if sum(vec1) == 0 or sum(vec2) == 0:
+            #     distance = 0
+            # else:
+            #     distance = spatial.distance.cosine(vec1, vec2)
+            # loss += distance if score1 == score2 else 1 - distance
+            loss.append(distance if score1 == score2 else 1 - distance)
+            # loss.append(abs(distance - abs(score2-score1)/5))
+        # vector_ans = [self.__sent2vec(ans[0], weights_dict) for ans in training_data]
+        # for i in range(len(vector_ans)):
+        #     ws1 = vector_ans[i]
+        #     for j in range(i, len(vector_ans)):
+        #         ws2 = vector_ans[j]
+        #         distance = self.__distance_func(ws1, ws2)
+        #         loss.append(distance if self.__scores[i] == self.__scores[j] else 1 - distance)
+        # loss = loss / len(training_data)
+        loss = sum(loss) / len(loss)
+        # print('loss:', loss)
+        return loss
+
+    def __loss_func(self, weights, sents = None):
+        loss = []
+        weights_dict = dict(zip(self.__voc, weights))
+
+        # Generate vector of answers
+        if not sents:
+            sents = self.__sent_words
+        vector_ans = [self.__sent2vec(ans, weights_dict) for ans in sents]
         for i in range(len(vector_ans)):
             ws1 = vector_ans[i]
             for j in range(i, len(vector_ans)):
                 ws2 = vector_ans[j]
-                distance = self.__hf(weights, ws1, ws2)
+                distance = self.__distance_func(ws1, ws2)
                 loss.append(distance if self.__scores[i] == self.__scores[j] else 1 - distance)
         loss = sum(loss) / len(loss)
-        print('loss:', loss)
+        # print('loss:', loss)
         return loss
 
-    def _fit(self, answers, scores, f_w2v=None):
+    #
+    #
+    # def __loss_func_part(self, weights):
+    #     loss = []
+    #     weights_dict = dict(zip(self.__voc, weights))
+    #     # Generate vector of answers
+    #     vector_ans = [self.__sent2vec(ans, weights_dict) for ans in training_data]
+    #     for i in range(len(vector_ans)):
+    #         ws1 = vector_ans[i]
+    #         for j in range(i, len(vector_ans)):
+    #             ws2 = vector_ans[j]
+    #             distance = self.__distance_func(ws1, ws2)
+    #             loss.append(distance if self.__scores[i] == self.__scores[j] else 1 - distance)
+    #     loss = loss / len(loss)
+    #     print('loss:', loss)
+    #     return loss
+
+    def __token_lemma(self, string):
+        doc = self.__nlp(string)
+        return [self.__lemmatizer(doc[i].string, doc[i].pos)[0] for i in range(len(doc)) if doc[i].pos_ != u'PUNCT']
+
+    def fit_simple(self, answers, scores):
         '''
         Prepare for generating vectors for answers.
+        Simple method
         * Generate vocabulary
         * Train word2vec instance if necessary
         * Calculate weight for each word
         :param answers: A list of raw data of answers
         :param scores: A list of scores as training data. The length need to be
                         the same with with the list of answers
-        :param f_w2v: An instance of word2vec. If not provided, a new one will be trained
-                        with the vocabulary
         :return: None
         '''
 
@@ -1343,14 +1472,12 @@ class Feature:
             for w in self.__weights:
                 self.__weights[w] = sigmoid(self.__weights[w])
 
-        # print(sorted(self.weights.items(), key=lambda d:d[1], reverse=True)[:11])
+        # print(sorted(self.__weights.items(), key=lambda d:d[1], reverse=True)[:11])
 
-        if not f_w2v:
+        if not self.__w2v:
             # No w2v model is provided, then train a new one use current vocabulary
             voc = [nltk.word_tokenize(s) for s in answers]
             self.__w2v = Word2Vec(voc, min_count=1)
-        else:
-            self.__w2v = Word2Vec.load(f_w2v)
 
             # Generate vectors for query answer
             # for words in self.sent_words:
@@ -1358,7 +1485,7 @@ class Feature:
 
             # training knn model
 
-    def fit(self, answers, scores):
+    def fit(self, answers, scores, lemmatizer):
         '''
         Prepare for generating vectors for answers.
         * Generate vocabulary
@@ -1374,9 +1501,10 @@ class Feature:
 
         assert len(answers) == len(scores)
 
-        self.__scores = scores[:]
+        self.__scores = list(map(float, scores))
 
         # Tokenize each answer with lemmatization
+        print("Tokenizing...")
         if self.__w2v:
             # if word2vec model is provided, the vector of answer words will be generated at the same time
             words_of_ans = []
@@ -1404,25 +1532,54 @@ class Feature:
                 vs = [self.__w2v[w] if w in self.__w2v else np.zeros(self.d_vec) for w in ws]
                 word_vectors_of_ans.append(vs)
             self.__vec_sent_words = word_vectors_of_ans
-
         assert len(words_of_ans) == len(answers)
 
+        # Generate training data and validation data
+        print("Generating training data and validation data...")
+        sent_words = self.__sent_words[:]
+        sent_score= self.__scores[:]
+        sent_data = list(zip(sent_words, sent_score))
+        l_sent_data = len(sent_data)
+
+        sent_data = [(sent_data[i], sent_data[j]) for i in range(l_sent_data) for j in range(i,l_sent_data)]
+        random.shuffle(sent_data)
+        l_sent_data = len(sent_data)
+
+        # take 90% of the data for training, and the left 10% for validation
+        edge = int(0.9 * l_sent_data)
+        self.__training_data = sent_data[:edge]
+        self.__validation_data = sent_data[edge:]
+
+        self.__cur = 0
+        self.__step = int(1.0 * len(self.__training_data))
+        print("Training step:", self.__step)
+
         # Generate vocabulary based on all training data
+        print("Generateing vocabulary...")
         self.__voc = set(reduce(lambda x, y: set(x) | set(y), words_of_ans))
+        print("Size of vocabular:", len(self.__voc))
 
         # calculate weights for each word in vocabulary
-        weights = np.ones(len(self.__voc)) / 100
-        grad_desent = grad(self.__loss_func)
-
-        for i in range(100):
-            print("%dth round training weight" % i)
+        print("Training weights for words...")
+        weights = np.ones(len(self.__voc)) / 10
+        # weights = np.array([random.random() for i in range(len(self.__voc))])
+        grad_desent = autograd.grad(self.__loss_func)
+        print('init_weight(10/0.03):', sorted(weights)[:10])
+        epochs = 0
+        while True:
+            epochs += 1
             gradient = grad_desent(weights)
-            weights -= 0.07 * gradient
-            # print("gradient:", gradient)
-            # print("weights:", weights)
+
+            weights -= 0.03 * gradient
+            loss = self.__loss_func(weights, self.__validation_data)
+            print('loss in {}th epoch: {}'.format(epochs, loss))
+            print('weights:', sorted(weights)[:11])
+            print('gradient:', sorted(gradient)[:10])
+            # print()
 
         self.__weights = dict(zip(self.__voc, weights))
         print(sorted(self.__weights.items(), key=lambda d: d[1], reverse=True)[:11])
+        print("Fit done")
 
     def feature(self, sent):
         # feature_file = RESULTS_PATH + "/features_weighted_bow/" + fn
@@ -1433,6 +1590,7 @@ class CosineKNN():
     def __init__(self, n_neighbors=5, dist_func='cos'):
         self.n_neighbors = n_neighbors
         self.dist_func = None
+        self.nearest = dict()
         if 'cos' == dist_func:
             self.dist_func = spatial.distance.cosine
         elif 'l2' == dist_func:
@@ -1444,6 +1602,17 @@ class CosineKNN():
     def fit(self, X, Y):
         self.x = X
         self.y = Y
+
+    def k_nearest(self, vec, k):
+        neighbors = []
+        for idx in range(len(self.x)):
+            vec_x = self.x[idx]
+            distance = self.dist_func(vec, vec_x)
+            neighbors.append((idx, distance))
+        neighbors = sorted(neighbors, key=lambda t:t[1])[:k]
+        neighbors = list(zip(*neighbors))
+        return neighbors
+
 
     def predict(self, vecs):
         # compute cosine similarity
@@ -1461,33 +1630,6 @@ class CosineKNN():
         return np.array(preds)
 
 
-def generate_features_sent2vec():
-    feature_path = RESULTS_PATH + "/features_sent2vec/"
-    if not os.path.exists(feature_path):
-        os.makedirs(feature_path)
-
-    for que_id in sorted(os.listdir(RAW_PATH_STU)):
-        print("\n" + que_id)
-        # generate bow features
-        with open(RAW_PATH_STU + "/" + que_id, 'r', errors="ignore") as f_ans, \
-                open(DATA_PATH + '/scores/{}/ave'.format(que_id), 'r') as f_score, \
-                open(feature_path + "/" + que_id, 'w') as f_fea:
-            arr_ans = np.array(f_ans.readlines())
-            scores = np.array(f_score.readlines())
-            bar = progressbar.ProgressBar(max_value=len(arr_ans))  # progressbar
-            bar_i = 0  # progressbar
-            for i in range(len(arr_ans)):
-                filter = np.array([True] * len(arr_ans))
-                filter[i] = False
-
-                fea = Feature()
-                fea.fit(arr_ans[filter], scores[filter])
-                feature = fea.feature(nltk.word_tokenize(arr_ans[i]))
-                print(*feature, file=f_fea, sep=',')
-                bar.update(bar_i)  # progressbar
-                bar_i += 1  # progressbar
-
-
 def train_w2v(fn, model_name, tokenizer):
     with open(fn, 'r', errors='ignore') as f_sents:
         voca = []
@@ -1497,26 +1639,10 @@ def train_w2v(fn, model_name, tokenizer):
         model.save(RESULTS_PATH + "/models_w2v/" + model_name)
 
 
-def weight_test(que_id, nlp=None, tokenizer=None, lemmatizer=None):
-    with open(DATA_PATH + "/raw/ans_stu/" + que_id, 'r') as fq, \
-            open(DATA_PATH + "/scores/" + que_id + "/ave", 'r') as fs:
-        f_w2v = RESULTS_PATH + '/models_w2v//w2v_all'
-        raw_answers = fq.readlines()
-        raw_scores = fs.readlines()
-        g = Feature(f_w2v, nlp, tokenizer, lemmatizer)
-        g.fit(raw_answers, raw_scores)
-
-
 if __name__ == '__main__':
     # run_procerpron_learning()
     # read_training_data("/features_bow_1gram/")
+    generate_features_bow([1,], True, False)
 
     # training w2v
-    nlp = spacy.load('en')
-    tokenizer = spacy.tokenizer.Tokenizer(nlp.vocab)
-    lemmatizer = spacy.lemmatizer.Lemmatizer(LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES)
-
-    # w2v_train_file = RAW_PATH + '/all'
-    # train_w2v(w2v_train_file, 'w2v_all', tokenizer)
-    weight_test('11.7', nlp, tokenizer, lemmatizer)
-    # generate_features_sent2vec()
+    # generate_features_sent2vec(f_w2v, nlp, lemmatizer)
