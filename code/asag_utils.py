@@ -1,11 +1,9 @@
 from nltk.corpus import wordnet as wn
 from nltk.corpus import wordnet_ic as wic
-from sklearn.metrics import mean_squared_error
-from sklearn.cluster import KMeans
 from functools import reduce
 import collections
 
-from math import sqrt
+from math import sqrt, ceil
 import re
 import math
 import numpy as np
@@ -32,7 +30,9 @@ import spacy
 from spacy.lang.en import LEMMA_INDEX, LEMMA_EXC, LEMMA_RULES
 import random
 from config import *
-from basic_util import token_lemma
+from basic_util import token_lemma, clean_text
+from itertools import groupby
+
 
 LEVENSHTEIN = 3
 
@@ -1134,6 +1134,7 @@ def read_training_data(feature_path, raw_path=RAW_PATH, score_path=DATA_PATH + '
 
             recode_i = list(zip(id_q, raw_que, id_s, raw_stu, raw_ref, features, scores_truth, diff))
             record.extend(recode_i)
+
     TrainingData = collections.namedtuple('TrainingData', 'id id_que que id_ans ans ref feature score diff')
     ret = TrainingData(list(range(len(record))), *list(map(np.array, zip(*record))))
     # print(ret.id, ret.id_que, ret.stu)
@@ -1158,29 +1159,30 @@ def score_answer(fn_prefix, reliable, feature, model, model_params, qwise, train
         runner = SVR(**model_params)
     elif 'cos' == model:
         runner = CosineKNN(**model_params)
-
+    elif 'cosc' == model:
+        runner = CosineKNNC(**model_params)
     # Read training data
     training_data = read_training_data(RESULTS_PATH + "/features_" + feature)
 
     n_data = len(training_data.id)
     with open(result_path + '/result.txt', 'w') as fr:
         for i in training_data.id:
-            filter = list()
+            filter_arr = list()
             if qwise:
                 filter_qwise = np.array(training_data.id_que) == training_data.id_que[i]
-                filter.append(filter_qwise)
+                filter_arr.append(filter_qwise)
             if reliable:
-                filter.append(np.array(training_data.diff) < 3)
+                filter_arr.append(np.array(training_data.diff) < 3)
             filter_rm = [True] * n_data
             filter_rm[i] = False
-            filter.append(filter_rm)
+            filter_arr.append(filter_rm)
 
-            filter = np.array(list(map(lambda f: reduce(lambda x, y: x and y, f), zip(*filter))))
+            filter_arr = np.array(list(map(lambda f: reduce(lambda x, y: x and y, f), zip(*filter_arr))))
 
-            scores_truth = training_data.score[filter]
-            features = training_data.feature[filter]
-            no_of_answers = training_data.id_ans[filter]
-            id_ques = training_data.id_que[filter]
+            scores_truth = training_data.score[filter_arr]
+            features = training_data.feature[filter_arr]
+            no_of_answers = training_data.id_ans[filter_arr]
+            id_ques = training_data.id_que[filter_arr]
 
             X = features[:training_scale] if training_scale > 0 else features
             X = np.vstack(X)
@@ -1202,15 +1204,19 @@ def score_answer(fn_prefix, reliable, feature, model, model_params, qwise, train
             que_id = training_data.id_que[i]
             ans_id = training_data.id_ans[i]
 
+            len_ref = len(list(filter(lambda x:x, clean_text(ans_ref).split(' '))))
+            len_stu = len(list(filter(lambda x:x, clean_text(ans_stu).split(' '))))
             if 'knnc' == model or 'knnr' == model:
                 distance_of_neighbors, no_of_neighbors = runner.kneighbors(np.array([feature_i]),
                                                                            model_params['n_neighbors'])
-
+                runner.predict_proba()
                 # Find the N.O. of nearest answers by features
-                n_s = ['{}.{}'.format(training_data.id_que[i], no_of_answers[no]) for no in no_of_neighbors[0]]
-                t_s = [Y[no] / 2 for no in no_of_neighbors[0]]
-                d_s = distance_of_neighbors[0]
-
+                n_s = ['{}.{}'.format(training_data.id_que[i], no_of_answers[no]) for no in no_of_neighbors[0]] # ans_id
+                t_s = [str(Y[no] / 2) for no in no_of_neighbors[0]] # scores of neighbors
+                d_s = distance_of_neighbors[0]  # distance
+                neighbor_scores = [Y[no]/2 for no in no_of_neighbors[0]]
+                mean_neighbor_scores = sum(neighbor_scores) / len(neighbor_scores)
+                mean_distance = sum(d_s)/len(d_s)
                 print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
                     que_id, ans_id,
                     score[0],
@@ -1221,26 +1227,24 @@ def score_answer(fn_prefix, reliable, feature, model, model_params, qwise, train
                     question,
                     ans_ref,
                     ans_stu))
-                print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
-                    que_id, ans_id, score[0],
-                    score_truth_i,
-                    error,
-                    error_abs, error_round,
-                    question, ans_ref,
-                    ans_stu, *n_s, *t_s),
+                print('score of {qid}.{aid}\t{pred}\t{truth}\t{err}\t{err_abs}\t{que}\t{ref}\t{stu}\t{id_nei}\t \
+                    {score_nei}\t{mean_score_nei}\t{mean_dist}\t{len_ref}\t{len_stu}'.format(
+                    qid=que_id, aid=ans_id, pred=score[0], truth=score_truth_i, err=error, err_abs=error_abs,
+                    que=question, ref=ans_ref, stu=ans_stu, id_nei=','.join(n_s), score_nei=','.join(t_s),
+                    mean_score_nei=mean_neighbor_scores, mean_dist=mean_distance, len_ref=len_ref, len_stu=len_stu),
                     file=fr)
                 # with open(result_path + '/features.txt', 'a') as f_features:
                 #     print('X of {}.{}:'.format(que_id, ans_id),  X, file=f_features)
             elif 'svr' == model:
-                if model_params['kernel'] == 'linear':
-                    # generate word_weights_dict
-                    with open('{}/vocabulary_svr/bow_{}.{}'.format(RESULTS_PATH, que_id, ans_id ), 'r', errors="ignore") as f_voc, \
-                        open('{}/word_weights_svr/{}.{}'.format(RESULTS_PATH, que_id, ans_id ), 'w') as f_weight:
-                        voc = f_voc.readline().strip().split('\t')
-                        weight = runner.coef_
-                        weight_dict = dict(zip(voc, weight[0]))
-                        string = ','.join(["{}:{}".format(k, w) for (k, w) in weight_dict.items()])
-                        f_weight.write(string)
+                # if model_params['kernel'] == 'linear':
+                #     # generate word_weights_dict
+                #     with open('{}/vocabulary_svr/bow_{}.{}'.format(RESULTS_PATH, que_id, ans_id ), 'r', errors="ignore") as f_voc, \
+                #         open('{}/word_weights_svr/{}.{}'.format(RESULTS_PATH, que_id, ans_id ), 'w') as f_weight:
+                #         voc = f_voc.readline().strip().split('\t')
+                #         weight = runner.coef_
+                #         weight_dict = dict(zip(voc, weight[0]))
+                #         string = ','.join(["{}:{}".format(k, w) for (k, w) in weight_dict.items()])
+                #         f_weight.write(string)
 
                 print('score of {}.{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
                     que_id, ans_id, score[0], score_truth_i,
@@ -1253,7 +1257,7 @@ def score_answer(fn_prefix, reliable, feature, model, model_params, qwise, train
                     error_abs, error_round, question, ans_ref, ans_stu),
                     file=fr)
 
-            elif 'cos' == model:
+            elif 'cos' == model or 'cosc' == model:
                 idx, dist = runner.k_nearest(np.array([feature_i]), model_params['n_neighbors'])
                 n_s = ['{}.{}'.format(training_data.id_que[i], no_of_answers[no]) for no in idx]
                 t_s = [Y[no] / 2 for no in idx]
@@ -1629,6 +1633,64 @@ class CosineKNN():
             preds.append(sum(neighbor_scores) / len(neighbor_scores))
         return np.array(preds)
 
+class CosineKNNC():
+    def __init__(self, n_neighbors=5, dist_func='cos'):
+        self.n_neighbors = n_neighbors
+        self.dist_func = None
+        self.nearest = dict()
+        if 'cos' == dist_func:
+            self.dist_func = spatial.distance.cosine
+        elif 'l2' == dist_func:
+            def euclidean(x, y):
+                return np.linalg.norm(x - y)
+
+            self.dist_func = euclidean
+
+    def fit(self, X, Y):
+        self.x = X
+        self.y = Y
+
+    def k_nearest(self, vec, k):
+        neighbors = []
+        for idx in range(len(self.x)):
+            vec_x = self.x[idx]
+            distance = self.dist_func(vec, vec_x)
+            neighbors.append((idx, distance))
+        neighbors = sorted(neighbors, key=lambda t:t[1])[:k]
+        neighbors = list(zip(*neighbors))
+        return neighbors
+
+
+    def predict(self, vecs):
+        # compute cosine similarity
+        # find top N largest ones
+        # calculate score by average
+        preds = []
+        for vec in vecs:
+            distance = []
+            for v_x in self.x:
+                distance.append(self.dist_func(v_x, vec))
+            distance_score = list(sorted(zip(distance, self.y)))
+            count = {}
+            dists = {}
+            for dis, sco in distance_score:
+                count[sco] = count.get(sco, 0) + 1
+                if sco in dists:
+                    dists[sco].append(dis)
+                else:
+                    dists[sco] = [sco,]
+            for sco in dists:
+                dists[sco] = sum(dists[sco])/len(dists[sco])
+            score_count = sorted(count.items(), key=lambda x:x[1], reverse=True)
+            res_score, res_count = score_count[0]
+            for s, c in score_count[1:]:
+                if c < res_count:
+                    break
+                elif dists[s] < dists[res_score]:
+                    res_score, res_count = s, c
+            preds.append(res_score)
+        return np.array(preds)
+
 
 def train_w2v(fn, model_name, tokenizer):
     with open(fn, 'r', errors='ignore') as f_sents:
@@ -1638,11 +1700,71 @@ def train_w2v(fn, model_name, tokenizer):
         model = Word2Vec(voca, min_count=5)
         model.save(RESULTS_PATH + "/models_w2v/" + model_name)
 
+def score_distance(fn_prefix, reliable, feature, distance, qwise):
+    fn = 'score_distance.{}.{}.{}.{}.{}.'.format(fn_prefix, feature, 'reliable' if reliable else 'unreliable',
+                                    'qwise' if reliable else 'unqwise', cur_time())
+
+    result_path = RESULTS_PATH + '/results/' + fn
+    if not os.path.exists(result_path):
+        os.mkdir(result_path)
+
+    # Read data
+    feature_path = RESULTS_PATH + "/features_" + feature
+    score_path = DATA_PATH + '/scores/'
+    ids_que = os.listdir(feature_path)
+    distance_sum_all_table = np.array([0] * 6)
+    distance_n_all_table = np.array([0] * 6)
+    distance_all = []
+    for i in range(6):
+        distance_all.append(np.array([]))
+    with open(result_path + '/score_distance_que.txt', 'w') as f_sd:
+        for id_que in ids_que:
+            with open(feature_path + '/' + id_que, 'r') as ff, \
+                    open(score_path + '/' + id_que + '/ave') as fs:
+                scores_truth = np.array(list(map(float, fs.readlines())))
+                features = list(map(lambda s: s.split(','), ff.readlines()))
+                features = (list(map(lambda l: np.array(list(map(np.float64, l))), features)))
+
+                distance_table = ['0'] * 6
+                score_vali = ['0'] * 6
+
+                print('question '+ id_que)
+                score_fea = list(zip(scores_truth, features))
+                score_fea.sort(key=lambda x:x[0])
+                for s, items in groupby(score_fea, key=lambda x:ceil(x[0])):
+                    print('score: ',s)
+                    feas = list(zip(*items))[1]
+                    d_d, d_m, d_st = distance_of_couples(feas, distance)
+                    distance_table[s] = '{:.3f}'.format(d_m)
+                    distance_all[s] = np.append(distance_all[s], d_d)
+                    score_vali[s] = '1' if len(d_d) > 0 else '0'
+
+
+                print('distance of {qid}\t{distance}\t{score_count}'.format(
+                    qid=id_que, distance = '\t'.join(distance_table), score_count = '\t'.join(score_vali)), file=f_sd)
+
+    with open(result_path + '/score_distance_all.txt', 'w') as f_sd:
+        f_sd.write('{}\t{}\t{}\n'.format('score', 'mean_distance', 'std_deviation'))
+        print(distance_all)
+        for i in range(len(distance_all)):
+            ds = distance_all[i]
+            f_sd.write('{}\t{}\t{}\n'.format(i, np.mean(ds), np.std(ds) ))
+        # distance_mean = distance_sum_all_table/distance_n_all_table
+        # print(distance_sum_all_table)
+        # print(distance_n_all_table)
+        # for i in range(len(distance_n_all_table)):
+        #     f_sd.write(str(i)+'\t')
+        # f_sd.write('\n')
+        # for d in distance_mean:
+        #     f_sd.write('{:.3f}'.format(d)+'\t')
+
+
 
 if __name__ == '__main__':
+    pass
     # run_procerpron_learning()
     # read_training_data("/features_bow_1gram/")
-    generate_features_bow([1,], True, False)
+    # generate_features_bow([1,], True, False)
 
     # training w2v
     # generate_features_sent2vec(f_w2v, nlp, lemmatizer)

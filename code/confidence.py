@@ -37,6 +37,7 @@ def count_confidence_error(fn):
 
         err_abs_list = []
         for i in range(len(results)):
+            # add the confidence info to a new results file.
             result_confidence = '{}\t{}\n'.format(results[i].strip(), confidence[i])
             f_resc.write(result_confidence)
 
@@ -83,10 +84,6 @@ def count_confidence_error(fn):
             f_count_flat.write('{:.1f}\t{}\t{}\t{}\n'.format(cur_conf, num_ans, '\t'.join(map(str, line)),  mean_error))
             f_count_flat_per.write('{:.3f}\t{:.2f}\t{}\t{}\n'.format(cur_conf, num_ans / len(results),
                                                                      '\t'.join(map(lambda x:format(x/num_ans if num_ans > 0 else 0, '0.3f'), line) ), mean_error))
-
-
-
-
 
 
 if __name__ == '__main__':

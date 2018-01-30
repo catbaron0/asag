@@ -294,7 +294,7 @@ class Feature:
         # for ans in answers_raw:
         #     doc = self.__nlp(ans)
         #     words_of_ans.append(self.__lemmatizer(doc[i].string, doc[i].pos) for i in range(len(doc)))
-        self.__sent_words_list = np.array([token_strip(ans, self.__nlp, self.__lemmatizer) for ans in answers_raw])
+        self.__sent_words_list = np.array([token_strip(ans, self.__nlp) for ans in answers_raw])
         # print("sent words list:", self.__sent_words_list)
         assert len(self.__sent_words_list) == len(answers_raw)
 
@@ -384,17 +384,25 @@ def generate_features_sent2vec(fname_w2v, instance_nlp, instance_lemmatizer, q_l
 
     for que_id in q_list:
         print("\n" + que_id)
+        ans_ref = ''
         # generate bow features
         with open(RAW_PATH_STU + "/" + que_id, 'r', errors="ignore") as f_ans, \
                 open(DATA_PATH + '/scores/{}/ave'.format(que_id), 'r') as f_score, \
                 open(voc_path + "/" + que_id, "w") as f_voc, \
                 open(feature_path + "/" + que_id, 'w') as f_fea:
-
+            with open(RAW_PATH + '/answers', 'r', errors='ignore') as f_ref:
+                for r in f_ref:
+                    if r.startswith(que_id):
+                        ans_ref = r
             raw_answers = f_ans.readlines()
+            raw_answers.append(ans_ref)
             for i in range(len(raw_answers)):
                 raw_answers[i] = ' '.join(raw_answers[i].split(' ')[1:])
             arr_ans = np.array(raw_answers)
-            scores = np.array(f_score.readlines())
+            scores = f_score.readlines()
+            if len(scores) < len(raw_answers):
+                scores.append(str(SCORE_LEVELS-1))
+            scores = np.array(scores)
             # bar = progressbar.ProgressBar(max_value=len(arr_ans))  # progressbar
             # bar_i = 0  # progressbar
             for i in range(len(arr_ans)):
@@ -420,7 +428,7 @@ def generate_features_sent2vec(fname_w2v, instance_nlp, instance_lemmatizer, q_l
                 print("done")
 
                 print("Generating...", end='')
-                feature = fea.feature(token_strip(arr_ans[i], instance_nlp, instance_lemmatizer))
+                feature = fea.feature(token_strip(arr_ans[i], instance_nlp))
 
                 # print('Feature:', *feature, sep=',')
                 print(*feature, file=f_fea, sep=',')
@@ -497,6 +505,37 @@ def weight_test(instance_nlp, instance_lemmatizer):
             g.fit(raw_answers, raw_scores, que_id = que_id, echo=True)
 
 
+def generate_feature_for_sentence(text, que_id, ans_id, w2v, dim):
+    # read weights of words
+    with open('{}/word_weights/{}'.format(RESULTS_PATH, que_id), 'r') as f_weights:
+        dict_lines = f_weights.readlines()
+        dict_string = dict_lines[ans_id-1]
+        weight_dict = dict([(item.split(':')[0], float(item.split(':')[1])) for item in dict_string.split(',')])
+
+    def sent2vec(word_list, weights_dict, w2v):
+        """
+        Generate sentence vectors as mean of weighted summary of word vectors.
+        :param word_list: iterable variable of words in the sentence
+        :param weights_dict:
+        :return: a vector with dimension of self.d_vec (same to w2v)
+        """
+
+        vec_sent = np.zeros(dim)
+        for word in word_list:
+            if word not in weights_dict:
+                continue
+            if word not in w2v:
+                continue
+            weight = weights_dict.get(word, 0)
+            vec = w2v[word]
+            vec_sent += weight* vec
+        return vec_sent / len(word_list)
+
+    feature = sent2vec(token_strip(text, NLP), weight_dict, w2v)
+    print(*feature, sep=',')
+
+
+
 if __name__ == '__main__':
     # run_procerpron_learning()
     # read_training_data("/features_bow_1gram/")
@@ -509,6 +548,6 @@ if __name__ == '__main__':
     # weight_test(instance_nlp=nlp, instance_lemmatizer=lemmatizer)
     q_list = sorted(os.listdir(RAW_PATH_STU))
     # generate_features_sent2vec(file_w2v, nlp, lemmatizer, ['1.1'])
-    generate_features_sent2vec(file_w2v, NLP, LEMMATIZER, q_list[0::5])
+    generate_features_sent2vec(file_w2v, NLP, LEMMATIZER, ['4.5'])
     # generate_features_sent2vec(file_w2v, nlp, lemmatizer)
     # generate_features_sent2vec_multi(file_w2v, nlp, lemmatizer)

@@ -12,13 +12,13 @@ def count_error(fn):
     with open(result_path + '/result.txt' , 'r') as fe, \
             open(result_path + '/errors.txt', 'w') as fo:
         svr_all = map(lambda line: line.split('\t'), fe.readlines())
-        _, score, truth, error, error_abs, error_round, *_ = zip(*svr_all)
-        count = len(error)
+        _, score, truth, error, error_abs, *_ = zip(*svr_all)
+        count = len(error_abs)
         score = map(float, score)
         truth = map(float, truth)
         error = map(float, error)
         error_abs = map(float, error_abs)
-        error_round = map(float, error_round)
+        # error_round = map(float, error_round)
         rms = sqrt(mean_squared_error(list(score), list(truth)))
 
         def count_hist(error_hist, echo=False):
@@ -37,12 +37,14 @@ def count_error(fn):
 
         d_error = count_hist(error)
         d_error_abs = count_hist(error_abs)
-        d_error_round = count_hist(error_round)
-        errors = zip(d_error.keys(), d_error.values(), d_error_abs.values(), d_error_round.values())
+        # d_error_round = count_hist(error_round)
+        errors = zip(d_error.keys(), d_error.values(), d_error_abs.values())
+        # errors = d_error_abs.values()
+        # for item in d_error_abs.items():
+        #     fo.write('{}\t{}\n'.format(item[0], item[1]))
         errors = map(lambda line: '\t'.join(map(str, line)) + '\n', errors)
         fo.writelines(errors)
-        fo.write('{}\t{}\t{}\t{}\n'.format(count, sum(d_error.values()), sum(d_error_abs.values()),
-                                           sum(d_error_round.values())))
+        fo.write('{}\t{}\t{}\n'.format(count, sum(d_error.values()), sum(d_error_abs.values())))
         fo.write('RMSE\t{}\n'.format(rms))
         fo.write('wF1: \t{}\n'.format(wf1))
 
